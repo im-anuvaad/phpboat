@@ -20,7 +20,7 @@ func TestTemplatesRender(t *testing.T) {
 	if err := s.parseTemplates(); err != nil {
 		t.Fatal(err)
 	}
-	row := AppRow{App: apps.App{Name: "web", Repo: "https://github.com/me/web", Domain: "web.example.com", Port: 20001}}
+	row := AppRow{App: apps.App{Name: "web", Repo: "https://github.com/me/web", Domain: "web.example.com", Concurrency: 4}}
 	rel := github.Release{Tag: "v2", Name: "Two", PublishedAt: time.Now()}
 	pages := map[string]any{
 		"home": map[string]any{"Apps": []AppRow{row}, "Host": hostinfo.Read(t.TempDir()), "Warnings": []string{"w"}},

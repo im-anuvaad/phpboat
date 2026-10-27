@@ -347,12 +347,16 @@ func (g *Group) WaitEmpty(ctx context.Context) error {
 
 // Stats is a point-in-time reading of a group's counters.
 type Stats struct {
-	MemoryCurrent int64 // bytes
-	CPUUsageUsec  int64 // cumulative
-	PidsCurrent   int64
-	OOMKills      int64 // cumulative memory.events oom_kill
-	IOReadBytes   int64 // cumulative, all devices (io.stat rbytes)
-	IOWriteBytes  int64 // cumulative, all devices (io.stat wbytes)
+	MemoryCurrent int64 // bytes, including reclaimable page cache
+	// MemoryApp is what the app itself uses: anon + shmem (OPcache) +
+	// kernel from memory.stat. memory.current also counts page cache
+	// charged to whichever app first read a shared file (phase 1, F5).
+	MemoryApp    int64
+	CPUUsageUsec int64 // cumulative
+	PidsCurrent  int64
+	OOMKills     int64 // cumulative memory.events oom_kill
+	IOReadBytes  int64 // cumulative, all devices (io.stat rbytes)
+	IOWriteBytes int64 // cumulative, all devices (io.stat wbytes)
 }
 
 // Stats reads the group's counters. Files of unavailable controllers read as 0.
@@ -364,6 +368,12 @@ func (g *Group) Stats() (Stats, error) {
 	}
 	if s.PidsCurrent, err = readInt(filepath.Join(g.Path, "pids.current")); err != nil {
 		return s, err
+	}
+	s.MemoryApp = s.MemoryCurrent
+	if ms, err := readKV(filepath.Join(g.Path, "memory.stat")); err == nil {
+		if app := ms["anon"] + ms["shmem"] + ms["kernel"]; app > 0 {
+			s.MemoryApp = min(app, s.MemoryCurrent)
+		}
 	}
 	cpu, err := readKV(filepath.Join(g.Path, "cpu.stat"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {

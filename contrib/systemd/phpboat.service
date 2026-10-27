@@ -1,5 +1,5 @@
 [Unit]
-Description=phpboat - minimal PaaS for small SQLite apps (Go, Zig or C)
+Description=phpboat - minimal PaaS for small PHP + SQLite apps
 Documentation=https://github.com/im-anuvaad/phpboat
 After=network-online.target
 Wants=network-online.target

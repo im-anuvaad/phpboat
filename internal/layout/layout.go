@@ -69,6 +69,20 @@ func (l Layout) DataDir(app string) string { return filepath.Join(l.AppDir(app),
 // TmpDir is the app's TMPDIR.
 func (l Layout) TmpDir(app string) string { return filepath.Join(l.AppDir(app), "tmp") }
 
+// RunDir holds the app's FPM socket (owned by the app user: FPM runs as
+// it and creates the socket; phpboat connects as root).
+func (l Layout) RunDir(app string) string { return filepath.Join(l.AppDir(app), "run") }
+
+// Socket is the app's FPM socket.
+func (l Layout) Socket(app string) string { return filepath.Join(l.RunDir(app), "php.sock") }
+
+// FPMConfig is the pool configuration phpboat writes before every start.
+// It is root-owned, outside anything the app can write.
+func (l Layout) FPMConfig(app string) string { return filepath.Join(l.AppDir(app), "php-fpm.conf") }
+
+// SessionsDir holds PHP sessions: kept across deploys, not backed up.
+func (l Layout) SessionsDir(app string) string { return filepath.Join(l.AppDir(app), "sessions") }
+
 // LogsDir holds the app's runtime logs.
 func (l Layout) LogsDir(app string) string { return filepath.Join(l.AppDir(app), "logs") }
 
@@ -99,6 +113,8 @@ func (l Layout) appDirs(app string) []dir {
 		{l.ReleasesDir(app), 0o755, false},
 		{l.DataDir(app), 0o700, true},
 		{l.TmpDir(app), 0o700, true},
+		{l.RunDir(app), 0o700, true},
+		{l.SessionsDir(app), 0o700, true},
 		{l.LogsDir(app), 0o700, false},
 		{l.BuildLogsDir(app), 0o700, false},
 		{filepath.Join(l.Root, "downloads"), 0o700, false},

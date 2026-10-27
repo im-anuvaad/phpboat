@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/logs"
 	"github.com/im-anuvaad/phpboat/internal/metrics"
+	"github.com/im-anuvaad/phpboat/internal/php"
 	"github.com/im-anuvaad/phpboat/internal/secrets"
 	"github.com/im-anuvaad/phpboat/internal/store"
 	"github.com/im-anuvaad/phpboat/internal/supervisor"
@@ -78,7 +81,12 @@ func serve(log *slog.Logger) error {
 		log.Warn("killed leftover processes from a previous run", "groups", cleaned)
 	}
 
-	sup := supervisor.New(supervisor.Deps{Layout: lay, Cgroups: cg, Log: log})
+	phpRT := detectPHP(log)
+	sup := supervisor.New(supervisor.Deps{Layout: lay, Cgroups: cg, Log: log, Web: supervisor.Web{
+		PHP:       phpRT.get,
+		ClientIP:  edge.ClientIP,
+		ErrorPage: edge.ErrorPage,
+	}})
 	dep, err := deployer.New(ctx, deployer.Deps{
 		Layout: lay, Store: st, Secrets: box, Supervisor: sup, Log: log,
 	})
@@ -147,6 +155,19 @@ func serve(log *slog.Logger) error {
 	bk.Schedule(runCtx)
 	mc.Run(runCtx)
 	go sup.StartAll(runCtx, func(name string) bool { return dep.DesiredRunning(runCtx, name) })
+	go phpRT.watch(runCtx, log, sup, dep)
+	go func() {
+		t := time.NewTicker(30 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case now := <-t.C:
+				sup.CleanAllSessions(now)
+			}
+		}
+	}()
 
 	usr1 := make(chan os.Signal, 1)
 	signal.Notify(usr1, syscall.SIGUSR1)
@@ -245,6 +266,12 @@ func newEdge(ctx context.Context, log *slog.Logger, lay layout.Layout, st *store
 	}
 	m.Router = &edge.Router{
 		Log: log,
+		Handler: func(name string) http.Handler {
+			if a := sup.Get(name); a != nil {
+				return a.Handler()
+			}
+			return nil
+		},
 		State: func(name string) edge.Availability {
 			if dep.Deploying(name) {
 				return edge.Deploying
@@ -264,6 +291,65 @@ func newEdge(ctx context.Context, log *slog.Logger, lay layout.Layout, st *store
 	}
 	m.Router.SetDashboardHost(m.DashboardHost())
 	return m, nil
+}
+
+// phpRuntime is the host's PHP, detected at start and again whenever it
+// was missing (the installer may add it while phpboat runs).
+type phpRuntime struct {
+	mu  sync.Mutex
+	rt  php.Runtime
+	err error
+	log *slog.Logger
+}
+
+func detectPHP(log *slog.Logger) *phpRuntime {
+	p := &phpRuntime{log: log}
+	p.get()
+	return p
+}
+
+func (p *phpRuntime) get() (php.Runtime, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err == nil && p.rt.FPM != "" {
+		return p.rt, nil
+	}
+	p.rt, p.err = php.Detect("")
+	if p.err != nil {
+		p.log.Error("no PHP: apps cannot start", "err", p.err)
+	} else {
+		p.log.Info("PHP found", "version", p.rt.Version, "fpm", p.rt.FPM, "build", p.rt.Build(context.Background()))
+	}
+	return p.rt, p.err
+}
+
+// watch restarts the running apps one at a time when apt updates PHP:
+// running FPM masters keep the old code until they restart (plan §3).
+func (p *phpRuntime) watch(ctx context.Context, log *slog.Logger, sup *supervisor.Supervisor, dep *deployer.Deployer) {
+	rt, err := p.get()
+	for err != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+		rt, err = p.get()
+	}
+	rt.Watch(ctx, 10*time.Minute, func(old, cur string) {
+		log.Warn("PHP was updated; restarting the running apps one at a time", "from", old, "to", cur)
+		for _, a := range sup.Apps() {
+			if a.Status().State != supervisor.Running {
+				continue
+			}
+			name := a.Spec().Name
+			a.Log().Writef("PHP was updated (%s → %s); restarting to use it", old, cur)
+			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			if err := dep.Restart(rctx, name); err != nil {
+				a.Log().Writef("restart after the PHP update failed: %v (a deploy also restarts it)", err)
+			}
+			cancel()
+		}
+	})
 }
 
 // logStatus prints every app's state (send SIGUSR1 to phpboat).

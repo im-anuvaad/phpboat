@@ -42,13 +42,14 @@ type Edge interface {
 
 // App is one app as configured in the dashboard.
 type App struct {
-	Name      string
-	Repo      string // https://github.com/<owner>/<repo>
-	Domain    string
-	Port      int
-	Limits    app.Limits
-	CreatedAt time.Time
-	EnvNames  []string
+	Name        string
+	Repo        string // https://github.com/<owner>/<repo>
+	Domain      string
+	Port        int // unused since phase 3 (FPM listens on a socket); dropped by phase 4's squashed schema
+	Concurrency int // PHP workers
+	Limits      app.Limits
+	CreatedAt   time.Time
+	EnvNames    []string
 }
 
 // Input is the form data for creating or editing an app. Empty optional
@@ -57,6 +58,7 @@ type App struct {
 type Input struct {
 	Repo, Domain      string
 	Memory, CPU, Pids string
+	Workers           string // PHP workers ("" = default on create)
 	// RestoreFrom (create only) is a bucket folder whose newest backup is
 	// restored into the new app ("" = start empty, AutoFolder = the folder
 	// named like the app, if there is one).
@@ -120,19 +122,19 @@ func (s *Service) Load(ctx context.Context) error {
 			s.log.Error("app not loaded", "app", a.Name, "err", err)
 			continue
 		}
-		s.log.Info("app loaded", "app", a.Name, "domain", a.Domain, "port", a.Port)
+		s.log.Info("app loaded", "app", a.Name, "domain", a.Domain, "workers", a.Concurrency)
 	}
 	return nil
 }
 
 // The type, branch, path, build_memory and build_timeout columns belong to
 // removed features and are left at fixed values.
-const appCols = `name, repo, domain, port, memory_max, cpu_max, pids_max, created_at`
+const appCols = `name, repo, domain, port, memory_max, cpu_max, pids_max, created_at, concurrency`
 
 func scanApp(r interface{ Scan(...any) error }) (App, error) {
 	var a App
 	var created int64
-	err := r.Scan(&a.Name, &a.Repo, &a.Domain, &a.Port, &a.Limits.MemoryMax, &a.Limits.CPUMax, &a.Limits.PidsMax, &created)
+	err := r.Scan(&a.Name, &a.Repo, &a.Domain, &a.Port, &a.Limits.MemoryMax, &a.Limits.CPUMax, &a.Limits.PidsMax, &created, &a.Concurrency)
 	a.CreatedAt = time.Unix(created, 0)
 	return a, err
 }
@@ -210,7 +212,7 @@ func (s *Service) config(ctx context.Context, a App) (deployer.AppConfig, error)
 	}
 	return deployer.AppConfig{
 		Base: app.Spec{
-			Name: a.Name, Domain: a.Domain, Port: a.Port,
+			Name: a.Name, Domain: a.Domain, Concurrency: a.Concurrency,
 			HealthPath: app.DefaultHealthPath, Env: env, Limits: a.Limits,
 		},
 		Repo: repo,
@@ -271,8 +273,12 @@ func (s *Service) validate(ctx context.Context, in Input, existing *App) (App, e
 		a.Limits.PidsMax, err = strconv.Atoi(v)
 		return
 	})
+	parse("PHP workers", in.Workers, strconv.Itoa(app.DefaultConcurrency), func(v string) (err error) {
+		a.Concurrency, err = strconv.Atoi(v)
+		return
+	})
 	if len(errs) == 0 {
-		spec := app.Spec{Name: a.Name, Port: firstPort, HealthPath: "/", Limits: a.Limits}
+		spec := app.Spec{Name: a.Name, HealthPath: "/", Concurrency: a.Concurrency, Limits: a.Limits}
 		if err := spec.Validate(); err != nil {
 			errs = append(errs, err)
 		}
@@ -293,10 +299,21 @@ func (s *Service) validate(ctx context.Context, in Input, existing *App) (App, e
 	return a, errors.Join(errs...)
 }
 
-func (s *Service) freePort() (int, error) {
+// freePort picks a value for the legacy apps.port column (UNIQUE NOT NULL
+// in the pre-phase-4 schema); nothing listens on it.
+func (s *Service) freePort(ctx context.Context) (int, error) {
 	used := map[int]bool{}
-	for _, a := range s.sup.Apps() {
-		used[a.Spec().Port] = true
+	rows, err := s.db.Reader().QueryContext(ctx, `SELECT port FROM apps`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p int
+		if err := rows.Scan(&p); err != nil {
+			return 0, err
+		}
+		used[p] = true
 	}
 	for p := firstPort; p <= lastPort; p++ {
 		if !used[p] {
@@ -363,13 +380,13 @@ func (s *Service) create(ctx context.Context, in Input) (App, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.Port, err = s.freePort(); err != nil {
+	if a.Port, err = s.freePort(ctx); err != nil {
 		return a, err
 	}
 	a.CreatedAt = time.Now()
 	if _, err := s.db.Writer().ExecContext(ctx, `INSERT INTO apps (`+appCols+`, type, branch, build_memory, build_timeout)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'release', '', 0, 0)`,
-		a.Name, a.Repo, a.Domain, a.Port, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.CreatedAt.Unix()); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'release', '', 0, 0)`,
+		a.Name, a.Repo, a.Domain, a.Port, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.CreatedAt.Unix(), a.Concurrency); err != nil {
 		return a, fmt.Errorf("save app: %w", err)
 	}
 	cfg, err := s.config(ctx, a)
@@ -380,7 +397,7 @@ func (s *Service) create(ctx context.Context, in Input) (App, error) {
 		s.db.Writer().ExecContext(ctx, `DELETE FROM apps WHERE name = ?`, a.Name)
 		return a, err
 	}
-	s.log.Info("app created", "app", a.Name, "domain", a.Domain, "port", a.Port)
+	s.log.Info("app created", "app", a.Name, "domain", a.Domain, "workers", a.Concurrency)
 	s.refreshEdge(true)
 	return a, nil
 }
@@ -399,8 +416,8 @@ func (s *Service) Update(ctx context.Context, name string, in Input) (App, error
 		return a, err
 	}
 	if _, err := s.db.Writer().ExecContext(ctx, `UPDATE apps SET repo = ?, domain = ?, memory_max = ?,
-		cpu_max = ?, pids_max = ?, type = 'release', branch = '' WHERE name = ?`,
-		a.Repo, a.Domain, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, name); err != nil {
+		cpu_max = ?, pids_max = ?, concurrency = ?, type = 'release', branch = '' WHERE name = ?`,
+		a.Repo, a.Domain, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.Concurrency, name); err != nil {
 		return a, err
 	}
 	if err := s.pushConfig(ctx, a); err != nil {
@@ -531,7 +548,7 @@ func (s *Service) Routes() []edge.Route {
 			sp = cfg.Base // domain edits apply to routing immediately
 		}
 		if sp.Domain != "" {
-			rs = append(rs, edge.Route{Host: sp.Domain, App: sp.Name, Port: sp.Port})
+			rs = append(rs, edge.Route{Host: sp.Domain, App: sp.Name})
 		}
 	}
 	return rs

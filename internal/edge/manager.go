@@ -381,7 +381,7 @@ func (m *Manager) rebuildHosts() {
 		hs = append(hs, hostEntry{Host: m.dashHost})
 	}
 	for _, r := range m.routes {
-		hs = append(hs, hostEntry{Host: r.Host, App: r.App})
+		hs = append(hs, hostEntry(r))
 	}
 	m.hosts = hs
 }

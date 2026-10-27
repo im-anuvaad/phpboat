@@ -175,7 +175,7 @@ func (c *Collector) sample(now time.Time) {
 		prev := c.prev[name]
 		c.prev[name] = cur
 		c.mu.Unlock()
-		p := Point{TS: now, Mem: gs.MemoryCurrent, MemLimit: a.Spec().Limits.MemoryMax, Pids: gs.PidsCurrent, P50: math.NaN(), P95: math.NaN()}
+		p := Point{TS: now, Mem: gs.MemoryApp, MemLimit: a.Spec().Limits.MemoryMax, Pids: gs.PidsCurrent, P50: math.NaN(), P95: math.NaN()}
 		r := rawSample{p: p, secs: secs}
 		if prev.ok {
 			p.CPU = 100 * float64(delta(cur.cpuUsec, prev.cpuUsec)) / 1e6 / secs

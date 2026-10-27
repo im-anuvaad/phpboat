@@ -23,7 +23,7 @@
       {{with $.Data.EdgeHost}}<small class="muted">· DNS {{.DNS}} · certificate until {{date .CertUntil}}</small>{{if .Error}}<br><span class="error-text">{{.Error}}</span>{{end}}{{end}}</dd>
     <dt>Release</dt><dd>{{if .Status.Release}}<code>{{.Status.Release}}</code>{{else}}<span class="muted">not deployed yet</span>{{end}}</dd>
     <dt>Repository</dt><dd><a href="{{.Repo}}/releases" target="_blank" rel="noopener">{{.Repo}}</a></dd>
-    <dt>Process</dt><dd>{{if .Status.PID}}pid {{.Status.PID}}, healthy {{ago .Status.HealthyAt}} · {{else}}not running · {{end}}port {{.Port}}</dd>
+    <dt>Process</dt><dd>{{if .Status.PID}}pid {{.Status.PID}}, healthy {{ago .Status.HealthyAt}} · {{else}}not running · {{end}}{{.Concurrency}} PHP workers</dd>
     <dt>Usage</dt><dd>{{if .MemBytes}}{{bytes .MemBytes}} of {{bytes .Limits.MemoryMax}} memory · {{end}}{{.Requests}} requests{{if .Requests5xx}} ({{.Requests5xx}} 5xx){{end}}</dd>
     <dt>Restarts</dt><dd>{{.Status.Restarts}}{{if .Status.OOMKills}} · <span class="error-text">{{.Status.OOMKills}} out-of-memory kills</span>{{end}}{{with .Status.LastExit}} · last exit: {{.}}{{end}}</dd>
   </dl>
@@ -143,6 +143,7 @@
       <label>Memory <input name="memory" value="{{.Memory}}" size="6"></label>
       <label>CPU cores <input name="cpu" value="{{.CPU}}" size="4"></label>
       <label>Processes <input name="pids" value="{{.Pids}}" size="5"></label>
+      <label>PHP workers <input name="workers" value="{{.Workers}}" size="3"></label>
     </fieldset>
     <div class="wide buttons"><button>Save settings</button></div>
   </form>
