@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026); phase 1 done ([results](phase1-results.md)), implementation from phase 2.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phases 0–2 done ([phase 1 results](phase1-results.md)); next: phase 3.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -51,17 +51,21 @@ Everything else from binboat stays as decided there: Cloudflare-only edge (Origi
 
 ## 4. Request path
 
-The router is binboat's (`Host` → app, Host must equal SNI, 503/502 pages, counters). Instead of a reverse proxy, each app gets a handler that resolves the path inside the **docroot** of the current build (default `public/`, §6):
+Implemented in phase 2: `internal/phpserve` (routing, static files) and `internal/fastcgi` (the client).
 
-1. Clean the path; dotfiles and dot-directories (`/.git`, `/.env`) → 404.
-2. `…/*.php` and the file exists **in the build** → run it with FastCGI (`PATH_INFO` supported: `/index.php/foo`).
-3. Any other existing file → served by phpboat (ETag/Last-Modified, Range, gzip for text types, a fixed MIME table, `X-Content-Type-Options: nosniff`). This includes files under persistent folders such as `public/uploads` (§6), but a `.php` file there is served as a 404, never run (P14).
-4. A directory → its `index.php` (run) or `index.html` (served); no directory listings.
-5. Otherwise, if `<docroot>/index.php` exists → run it (front controller, so pretty URLs work); else 404.
+The router is binboat's (`Host` → app, Host must equal SNI, 503/502 pages, counters). Instead of a reverse proxy, each app gets a `phpserve.Site` that resolves the path inside the **docroot** of the current build (default `public/`, §6):
 
-Request headers are capped at 32 KB (Cloudflare's own limit) → 431; FPM drops larger params with a broken pipe (F7). FastCGI parameters are set by phpboat, so apps need no proxy config: `REMOTE_ADDR` = `CF-Connecting-IP`, `HTTPS=on`, `REQUEST_SCHEME=https`, `SERVER_NAME`/`HTTP_HOST` = the domain, `SERVER_PORT=443`, `DOCUMENT_ROOT`, `SCRIPT_FILENAME`, `SCRIPT_NAME`, `REQUEST_URI`, `QUERY_STRING`, `CONTENT_*`. Incoming `X-Forwarded-*` headers are dropped (phpboat sets the true values). Bodies are streamed (Cloudflare caps them at 100 MB). Responses are streamed and flushed, so `flush()`/SSE works.
+1. Clean the path; any dot segment (`/.git`, `/.env`) → 404. With `docroot = "."`, also `vendor/`, `composer.json/lock`, `phpboat.toml` and `*.sqlite`, `*.sqlite3`, `*.db`, `*.sql`, `*.log` anywhere (case-insensitive) → 404.
+2. The first segment ending in `.php` that is a file → run it with FastCGI; the rest is `PATH_INFO` (`/index.php/foo`). Only if its real path is **inside the build and not in `$DATA_DIR`** (P14), so symlinks out of the build and uploads never run.
+3. Any other existing file → served by phpboat: a fixed MIME table (unknown → `application/octet-stream`), `nosniff`, ETag/Last-Modified/Range via `http.ServeContent`, GET/HEAD only (405). PHP-like files that weren't run (`.php` in uploads, `.PHP`, `.phtml`, `.phar`, `.inc`, `.php3`–`.php8`, `.phps`) are a 404, never shown as source. Files from `$DATA_DIR` (uploads) get `Content-Security-Policy: sandbox …`, so an uploaded `.html`/`.svg` can't run scripts on the app's origin. No compression at the origin: Cloudflare compresses for the visitor.
+4. A directory → redirect to the trailing slash (query kept), then its `index.php` (run) or `index.html` (served); no listings.
+5. Otherwise `<docroot>/index.php` if it exists (front controller, pretty URLs); else 404.
 
-The FastCGI client is phpboat's own (`internal/fastcgi`, ~400 lines, fuzzed): the Go stdlib only has the server side, and the protocol is small. One connection per request (unix socket, cheap); FPM's `listen.backlog` (256) absorbs bursts (no errors at c=128 against 4 workers in phase 1); a full backlog → 503. Requirements from the phase 1 profile (F8): pooled buffers, no goroutine or pipe per request, records read straight from the connection, params split across records, flush when FPM pauses rather than after every chunk. PHP error lines arrive as FastCGI `STDERR` records and go to the app log with the request's method and path (F10).
+Limits: request headers 32 KB → 431 (Cloudflare's own limit; FPM drops bigger params, F7); bodies 100 MB → 413. Bodies with a known length are streamed; chunked ones are spooled to `$TMPDIR` and counted, because FastCGI needs `CONTENT_LENGTH`.
+
+FastCGI parameters are set by phpboat, so apps need no proxy config: `REMOTE_ADDR` = the visitor (`CF-Connecting-IP` via `edge.ClientIP`), `HTTPS=on`, `REQUEST_SCHEME=https`, `SERVER_PORT=443`, `SERVER_NAME`/`HTTP_HOST` = the domain, `DOCUMENT_ROOT`, `DOCUMENT_URI`, `SCRIPT_FILENAME`, `SCRIPT_NAME`, `PATH_INFO`/`PATH_TRANSLATED`, `REQUEST_URI`, `QUERY_STRING`, `CONTENT_*`, `HTTP_*`. Never passed: `Proxy` (httpoxy), `X-Forwarded-*`, `X-Real-IP`, `Forwarded`, and any header containing `_` (it would alias a real one). Response headers are copied except `Status` and hop-by-hop ones; `Status:` sets the code, `Location:` alone means 302. Responses are streamed and flushed **when FPM has nothing more buffered**, so `flush()`/SSE reach the visitor at once without a flush per chunk.
+
+The client (`internal/fastcgi`): one connection per request on the unix socket; pooled buffers; no goroutine or pipe per request (records are read straight from the connection by the handler's goroutine); params split across records; FCGI_STDERR → the app log with the request's method and path, one line per `PHP message` (FPM joins several into one record, F10); `FCGI_OVERLOADED`, no socket or a full backlog → 503 with `Retry-After`, other failures → 502; the visitor going away closes the FPM connection. Fuzzed (`FuzzResponse`), unit-tested against a fake FPM (`fastcgi/fcgitest`), and integration-tested against real php-fpm 8.5 and 8.3 (`phpserve/integration_test.go`, run in CI).
 
 ## 5. Deploys
 
@@ -211,7 +215,7 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 |---|---|---|
 | **0. Baseline** ✅ | Copy, rename, strip binboat-only parts (§11) | builds and tests pass |
 | **1. Spike + budget** ✅ | On a real VPS (26.04, plus PHP 8.3 from a 24.04 rootfs): apt PHP, a hand-written `php-fpm -F` pool under a user + cgroup, a throwaway FastCGI client, the 5 sample apps (in `spike/samples/` for now; own repos in phase 4) | §10 measured, [results](phase1-results.md): **go** on P2–P5 |
-| **2. FastCGI + static** | `internal/fastcgi` (client, params, streaming, fuzz tests); `internal/phpserve` (routing rules §4, static files, P14, docroot `.` denylist) | unit tests + an integration test against a real php-fpm in CI (`apt install php-fpm`); `spike/check.sh` passes against it; beats the spike's numbers (F8) |
+| **2. FastCGI + static** ✅ | `internal/fastcgi` (client, params, streaming, fuzz tests, `fcgitest` fake); `internal/phpserve` (routing rules §4, static files, P14, docroot `.` denylist) | unit tests (~89 % coverage) + real php-fpm 8.5/8.3 integration tests (CI installs php-fpm); `spike/check.sh` 31/31 on both through the new packages; vs nginx: SQLite pages equal, light pages +0.2–0.4 ms p50 and −10–30 % req/s on a shared 1 vCPU (phase 1 spike: −45 %) |
 | **3. PHP runtime** | `internal/php` (pool + ini rendering, version detection, package-version watch); supervisor spawns FPM; health over FastCGI; edge router uses phpserve instead of the reverse proxy; contract env (no `PORT`/`HOST`) | an app dir prepared by hand serves through Cloudflare on a VPS |
 | **4. Source deploys** | `github` (branches, commits, tarball); `manifest` → `phpboat.toml` + defaults; deployer prepare stage (Composer, build cgroup), builds keyed by SHA, persist links, `before_start`; squashed migration; dashboard: Add app with branch, commits list, Rebuild; delete the release/asset code | deploy, redeploy, rollback, broken Composer, failing `before_start`, all on a VPS |
 | **5. Full-data backups** | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server |

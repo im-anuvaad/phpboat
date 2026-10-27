@@ -19,7 +19,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	_ "net/http/pprof"
 	"os"
 	"os/exec"
@@ -31,6 +30,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/im-anuvaad/phpboat/internal/fastcgi"
+	"github.com/im-anuvaad/phpboat/internal/phpserve"
 )
 
 func main() {
@@ -238,13 +240,13 @@ func prefixWriter(prefix string) io.Writer {
 type runningApp struct {
 	*App
 	cmd  *exec.Cmd
-	site *site
+	site *phpserve.Site
 }
 
 func serve(c *Config, addr string) error {
 	os.WriteFile(filepath.Join(c.Root, "spike.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
 	var apps []*runningApp
-	sites := map[string]*site{}
+	sites := map[string]*phpserve.Site{}
 	for _, ac := range c.Apps {
 		a, err := c.app(ac)
 		if err != nil {
@@ -280,10 +282,26 @@ func serve(c *Config, addr string) error {
 		if err != nil {
 			return fmt.Errorf("[%s] start fpm: %w", a.Name, err)
 		}
-		br, _ := filepath.EvalSymlinks(a.Build())
-		dr, _ := filepath.EvalSymlinks(a.Dir("data"))
-		s := &site{app: a, buildReal: br, dataReal: dr, docroot: a.Docroot(), rootMode: a.M.Docroot == "."}
-		if err := waitHealthy(s, a.M.HealthPath, 30*time.Second); err != nil {
+		name := a.Name
+		s, err := phpserve.New(phpserve.Config{
+			Build: a.Build(), Docroot: a.M.Docroot, DataDir: a.Dir("data"),
+			FastCGI: &fastcgi.Client{Address: a.Sock()},
+			ClientIP: func(r *http.Request) string {
+				if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+					return ip
+				}
+				h, _, _ := strings.Cut(r.RemoteAddr, ":")
+				return h
+			},
+			PHPLog: func(r *http.Request, line string) {
+				log.Printf("[%s] php: %s %s: %s", name, r.Method, r.URL.Path, line)
+			},
+			SpoolDir: a.Dir("tmp"),
+		})
+		if err != nil {
+			return fmt.Errorf("[%s] %w", a.Name, err)
+		}
+		if err := waitHealthy(s, a.Host, a.M.HealthPath, 30*time.Second); err != nil {
 			return fmt.Errorf("[%s] %w", a.Name, err)
 		}
 		log.Printf("[%s] READY php %s in %s (pid %d, %s)", a.Name, a.PHP, time.Since(start).Round(time.Millisecond), cmd.Process.Pid, a.Host)
@@ -291,7 +309,7 @@ func serve(c *Config, addr string) error {
 		sites[a.Host] = s
 	}
 
-	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s := sites[strings.Split(r.Host, ":")[0]]; s != nil {
 			s.ServeHTTP(w, r)
 			return
@@ -331,16 +349,14 @@ func serve(c *Config, addr string) error {
 	return nil
 }
 
-func waitHealthy(s *site, hp string, max time.Duration) error {
+func waitHealthy(s *phpserve.Site, host, hp string, max time.Duration) error {
 	deadline := time.Now().Add(max)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(s.app.Sock()); err == nil {
-			req := httptest.NewRequest("GET", "http://"+s.app.Host+hp, nil)
-			rec := httptest.NewRecorder()
-			s.ServeHTTP(rec, req)
-			if rec.Code >= 200 && rec.Code < 400 {
-				return nil
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		code, err := s.Ping(ctx, host, hp)
+		cancel()
+		if err == nil && code >= 200 && code < 400 {
+			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
