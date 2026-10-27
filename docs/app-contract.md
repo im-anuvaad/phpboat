@@ -27,9 +27,11 @@ phpboat sits in front of PHP-FPM and decides per request, inside the docroot of 
 | `/blog/` (folder) | its `index.php`, else `index.html`; no folder listings |
 | `/.env`, `/.git/…`, any path with a dot-folder | 404 |
 | `/uploads/shell.php` inside a `persist` folder | 404, never run |
+| `/inc/config.inc`, `/old.phtml`, any `.PHP` | 404: PHP-like files are never sent as source |
+| an uploaded `.html` or `.svg` | served with a sandboxing CSP, so its scripts can't run on your domain |
 | anything else | `index.php` of the docroot if it exists (pretty URLs: read `$_SERVER['REQUEST_URI']`), else 404 |
 
-You can rely on: `$_SERVER['REMOTE_ADDR']` is the **real visitor IP** (from Cloudflare), `$_SERVER['HTTPS'] === 'on'`, `$_SERVER['HTTP_HOST']` is your domain, `$_SERVER['HTTP_CF_IPCOUNTRY']` is passed through. No proxy settings are needed. Requests are limited to 100 MB (Cloudflare) and 95 s.
+You can rely on: `$_SERVER['REMOTE_ADDR']` is the **real visitor IP** (from Cloudflare), `$_SERVER['HTTPS'] === 'on'`, `$_SERVER['HTTP_HOST']` is your domain, `$_SERVER['HTTP_CF_IPCOUNTRY']` is passed through. No proxy settings are needed. Requests are limited to 100 MB (Cloudflare) and 95 s, request headers to 32 KB. Headers whose name contains `_` and `X-Forwarded-*`/`Forwarded` never reach PHP. PHP output is streamed: `flush()` reaches the visitor immediately (server-sent events work).
 
 ## 3. `phpboat.toml` (optional)
 

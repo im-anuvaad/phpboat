@@ -295,3 +295,8 @@ func (a *App) runIn(cg, dir string, out io.Writer, timeout time.Duration, argv .
 	defer t.Stop()
 	return cmd.Wait()
 }
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular()
+}
