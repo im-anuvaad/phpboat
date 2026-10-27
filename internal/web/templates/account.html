@@ -1,0 +1,59 @@
+{{define "content"}}
+{{$csrf := .CSRF}}
+<section class="card">
+  <h1>Account</h1>
+  <p>Signed in as <b>{{.Admin}}</b>. Forgot the password? Run the install command again over SSH: it prints a one-time password.</p>
+  <h2>Change email</h2>
+  <form method="post" action="/account/email" class="grid">
+    {{template "csrf" $csrf}}
+    <label>New email <input type="email" name="email" value="{{.Admin}}" autocomplete="username" required></label>
+    <label>Current password <input type="password" name="current" autocomplete="current-password" required></label>
+    <div class="wide buttons"><button>Change email</button></div>
+  </form>
+  <h2>Change password</h2>
+  <form method="post" action="/account/password" class="grid">
+    {{template "csrf" $csrf}}
+    <label>Current password <input type="password" name="current" autocomplete="current-password" required></label>
+    <label>New password <input type="password" name="new" autocomplete="new-password" minlength="12" required></label>
+    <label>Repeat new password <input type="password" name="confirm" autocomplete="new-password" minlength="12" required></label>
+    <div class="wide buttons"><button>Change password</button> <small class="muted">Signs out every other session.</small></div>
+  </form>
+</section>
+<section class="card">
+  <h2>Sessions</h2>
+  <table class="stack">
+    <thead><tr><th>Signed in</th><th>Last seen</th><th>IP</th><th>Browser</th></tr></thead>
+    <tbody>{{range .Data.Sessions}}
+      <tr><td>{{datetime .CreatedAt}}{{if .Current}} <span class="badge s-running">this session</span>{{end}}</td><td data-label="Last seen">{{ago .LastSeen}}</td><td data-label="IP">{{.IP}}</td><td class="clip" data-label="Browser">{{.UserAgent}}</td></tr>
+    {{end}}</tbody>
+  </table>
+  <form method="post" action="/account/revoke-others" class="inline">{{template "csrf" $csrf}}<button>Sign out all other sessions</button></form>
+</section>
+<section class="card" id="api">
+  <h2>API token</h2>
+  <p class="muted">Lets scripts and AI agents read the status of the server and the apps (<a href="https://github.com/im-anuvaad/phpboat/blob/main/docs/api.md" target="_blank" rel="noopener">API reference</a>). The API is read-only: it can't deploy, stop or change anything. Send the token as <code>Authorization: Bearer &lt;token&gt;</code> to <code>{{.Data.APIBase}}</code>.</p>
+  {{with .Data.NewAPIToken}}
+  <div class="info">
+    <b>Copy the new token now: it is not shown again.</b>
+    <input class="secret" value="{{.}}" readonly autocomplete="off" spellcheck="false" aria-label="New API token">
+    If there was a previous token, it has stopped working.
+  </div>
+  {{end}}
+  {{with .Data.APIToken}}
+  <dl class="facts">
+    <dt>Status</dt><dd>active, created {{datetime .CreatedAt}}</dd>
+    <dt>Last used</dt><dd>{{if .LastUsed.IsZero}}never{{else}}{{ago .LastUsed}}{{end}}</dd>
+  </dl>
+  {{else}}
+  <p>No token yet, so the API refuses every request.</p>
+  {{end}}
+  <form method="post" action="/account/api-token" class="grid" {{if .Data.APIToken}}data-confirm="Create a new token? The current one stops working immediately."{{end}}>
+    {{template "csrf" $csrf}}
+    <label>Current password <input type="password" name="current" autocomplete="current-password" required></label>
+    <div class="wide buttons"><button>{{if .Data.APIToken}}Rotate token{{else}}Create token{{end}}</button></div>
+  </form>
+  {{if .Data.APIToken}}
+  <form method="post" action="/account/api-token/revoke" class="inline" data-confirm="Revoke the API token? Everything using it stops working.">{{template "csrf" $csrf}}<button class="danger">Revoke token</button></form>
+  {{end}}
+</section>
+{{end}}

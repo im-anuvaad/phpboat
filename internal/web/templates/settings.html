@@ -1,0 +1,102 @@
+{{define "content"}}
+{{$csrf := .CSRF}}
+<h1>Settings</h1>
+<section class="card" id="cloudflare">
+  <h2>Cloudflare</h2>
+  {{with .Data.Edge}}
+  <dl class="facts">
+    <dt>API token</dt><dd>{{if .TokenSet}}set (stored encrypted){{else}}<span class="warn-text">not set yet: DNS records and certificates cannot be managed</span>{{end}}</dd>
+    <dt>Public IP</dt><dd>{{if .PublicIPv4}}{{.PublicIPv4}}{{else}}not detected yet{{end}}{{if and .PublicIPv6 (ne .PublicIPv6 "off")}} · {{.PublicIPv6}}{{end}}</dd>
+    <dt>Cloudflare IPs</dt><dd>{{.IPRanges}} ranges ({{.IPSource}}) · {{.Rejected}} connections from elsewhere refused</dd>
+    <dt>Last sync</dt><dd>{{ago .LastSync}}</dd>
+  </dl>
+  <form method="post" action="/settings/cloudflare-token" class="grid">
+    {{template "csrf" $csrf}}
+    <label class="wide">{{if .TokenSet}}Replace API token{{else}}API token{{end}}
+      <input type="password" name="token" autocomplete="off" required>
+      <small>Permissions: Zone Read, DNS Edit, SSL and Certificates Edit, Zone Settings Edit (<a href="https://github.com/im-anuvaad/phpboat#before-you-start" target="_blank" rel="noopener">how to create it</a>).</small></label>
+    <div class="wide buttons"><button>Verify and save</button></div>
+  </form>
+  {{with .LastError}}<p class="error pre">{{.}}</p>{{end}}
+
+  <div class="row">
+    <h3>Domains</h3>
+    <div class="buttons"><small class="muted">Also synced every 6 hours and after every change.</small>
+      <form method="post" action="/settings/edge-sync" class="inline">{{template "csrf" $csrf}}<button>Sync now</button></form></div>
+  </div>
+  <table class="stack">
+    <thead><tr><th>Domain</th><th>App</th><th>Zone</th><th>DNS</th><th>Certificate until</th><th>Problem</th></tr></thead>
+    <tbody>{{range .Hosts}}
+      <tr><td data-label="Domain">{{.Host}}</td><td data-label="App">{{if .App}}<a href="/apps/{{.App}}">{{.App}}</a>{{else}}dashboard{{end}}</td><td data-label="Zone">{{.Zone}}</td><td class="nowrap" data-label="DNS">{{if .DNS}}{{.DNS}}{{else}}<span class="muted">-</span>{{end}}</td><td class="nowrap" data-label="Certificate until">{{date .CertUntil}}</td><td class="error-text" data-label="Problem">{{.Error}}</td></tr>
+    {{else}}<tr><td colspan="6" class="muted">No domains yet: set the dashboard domain below, or give an app a domain.</td></tr>{{end}}</tbody>
+  </table>
+  {{if .Zones}}
+  <h3>Zones</h3>
+  <table>
+    <thead><tr><th>Zone</th><th>SSL/TLS mode</th><th>Origin pulls (AOP)</th><th></th></tr></thead>
+    <tbody>{{range .Zones}}
+      <tr><td>{{.Name}}</td><td>{{if .SSLMode}}{{.SSLMode}}{{else}}<span class="muted">unknown</span>{{end}}</td><td>{{.AOP}}</td>
+      <td>{{if and .SSLMode (ne .SSLMode "strict")}}<form method="post" action="/settings/ssl-strict" class="inline" data-confirm="Set {{.Name}} to Full (strict)? This affects every site in the zone.">{{template "csrf" $csrf}}<input type="hidden" name="zone" value="{{.Name}}"><button>Set Full (strict)</button></form>{{end}}
+      {{if .Warning}}<small class="warn-text">{{.Warning}}</small>{{else if .Error}}<small class="error-text">{{.Error}}</small>{{end}}</td></tr>
+    {{end}}</tbody>
+  </table>
+  {{end}}
+  {{end}}
+</section>
+
+<section class="card" id="dashboard-domain">
+  <h2>Dashboard domain</h2>
+  {{with .Data.Edge}}
+  {{if .Dashboard}}
+  <p>The dashboard is at <a href="https://{{.Dashboard}}/"><b>{{.Dashboard}}</b></a>:
+    {{if $.Data.DashboardReady}}<span class="badge s-running">ready</span>{{else}}<span class="badge s-deploying">being set up</span> <small class="muted">DNS record, certificate, origin pulls and the zone's SSL/TLS mode; this usually takes under a minute. Until it is ready the dashboard also answers on the server's IP address.</small>
+    <br><span class="warn-text">Waiting for: {{$.Data.DashboardProblem}}.</span>{{end}}</p>
+  {{else}}
+  <p class="warn-text">Not set yet: the dashboard is only reachable on the server's IP address, with a certificate warning.</p>
+  {{end}}
+  <form method="post" action="/settings/dashboard-domain" class="grid" {{if .Dashboard}}data-confirm="Move the dashboard to the new domain? You sign in again there, and the old domain's DNS record and certificate are removed."{{end}}>
+    {{template "csrf" $csrf}}
+    <label class="wide">{{if .Dashboard}}New domain{{else}}Domain{{end}} <input name="domain" placeholder="phpboat.example.com" required {{if not .TokenSet}}disabled{{end}}>
+      <small>{{if .TokenSet}}Must be in one of your Cloudflare zones. phpboat creates the DNS record and the certificate.{{else}}Save the Cloudflare token first.{{end}}</small></label>
+    <div class="wide buttons"><button {{if not .TokenSet}}disabled{{end}}>Save domain</button></div>
+  </form>
+  {{end}}
+</section>
+
+<section class="card" id="github">
+  <h2>GitHub</h2>
+  {{if .Data.GitHubSet}}
+  <p>A token is set{{with .Data.GitHubLogin}} for <b>{{.}}</b>{{end}}. It is stored encrypted and only sent to github.com.</p>
+  {{else}}
+  <p class="muted">No token: only releases of public repositories can be deployed.</p>
+  {{end}}
+  <form method="post" action="/settings/github-token" class="grid">
+    {{template "csrf" $csrf}}
+    <label class="wide">{{if .Data.GitHubSet}}Replace token{{else}}Personal access token{{end}}
+      <input type="password" name="token" autocomplete="off" placeholder="github_pat_…">
+      <small>Fine-grained token with <b>Contents: Read-only</b> on your app repositories: phpboat lists their releases and downloads the release files.</small></label>
+    <div class="wide buttons"><button>Save token</button>
+    {{if .Data.GitHubSet}}<button name="remove" value="1" class="link" data-confirm-click="Remove the GitHub token?">remove token</button>{{end}}</div>
+  </form>
+</section>
+
+
+<section class="card" id="backups">
+  <h2>Backups</h2>
+  <p class="muted">App databases are backed up {{.Data.Policy}}, into one folder per app at the root of the bucket (<code>&lt;app&gt;/</code>). Works with Cloudflare R2, Backblaze B2, AWS S3, MinIO or any S3-compatible storage; use a bucket for phpboat only.</p>
+  {{with .Data.S3}}<p>Bucket <b>{{.Bucket}}</b> at {{.Endpoint}} (region {{.Region}}, key <code>{{.AccessKey}}</code>). The secret is stored encrypted.</p>{{end}}
+  <form method="post" action="/settings/s3" class="grid">
+    {{template "csrf" $csrf}}
+    <label class="wide">Endpoint <input name="endpoint" value="{{with .Data.S3}}{{.Endpoint}}{{end}}" placeholder="https://&lt;account id&gt;.r2.cloudflarestorage.com" required></label>
+    <label>Bucket <input name="bucket" value="{{with .Data.S3}}{{.Bucket}}{{end}}" required></label>
+    <label>Region <input name="region" value="{{with .Data.S3}}{{.Region}}{{else}}auto{{end}}"><small>"auto" for R2</small></label>
+    <label>Access key ID <input name="access_key" value="{{with .Data.S3}}{{.AccessKey}}{{end}}" autocomplete="off" required></label>
+    <label>Secret access key <input type="password" name="secret_key" autocomplete="off" {{if not .Data.S3Set}}required{{end}} placeholder="{{if .Data.S3Set}}(unchanged){{end}}"></label>
+    <div class="wide buttons"><button>Test and save</button>
+    {{if .Data.S3Set}}<button name="remove" value="1" class="link" formnovalidate data-confirm-click="Remove the S3 settings? Backups will then only be kept on this server.">remove</button>{{end}}</div>
+  </form>
+
+</section>
+
+
+{{end}}
