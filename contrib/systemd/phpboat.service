@@ -1,0 +1,26 @@
+[Unit]
+Description=phpboat - minimal PaaS for small SQLite apps (Go, Zig or C)
+Documentation=https://github.com/im-anuvaad/phpboat
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting; the delay grows to at most 60s.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/phpboat serve
+Restart=always
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=60s
+# phpboat owns its cgroup subtree (supervisor/, apps/<app>/, builds/<app>/).
+Delegate=yes
+# SIGTERM goes to phpboat only, so it can stop apps gracefully in order (and
+# not mistake them for crashes). Anything left after the timeout is SIGKILLed.
+KillMode=mixed
+# phpboat forwards SIGTERM to apps and waits up to 10s each; leave headroom.
+TimeoutStopSec=45s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

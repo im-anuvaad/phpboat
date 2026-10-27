@@ -1,0 +1,39 @@
+{{define "content"}}
+<div id="home" data-refresh="5">
+{{with .Data.Host}}
+<section class="stats">
+  <div><b>{{.Hostname}}</b><small>up {{printf "%.0f" .Uptime.Hours}} h · kernel {{.Kernel}}</small></div>
+  <div><b>{{printf "%.2f" .Load1}}</b><small>load ({{.CPUs}} CPU)</small></div>
+  <div><b>{{pct .MemUsedPct}}</b><small>memory of {{bytes .MemTotal}}</small></div>
+  <div><b>{{pct .DiskUsedPct}}</b><small>disk · {{bytes .DiskFree}} free</small></div>
+</section>
+{{end}}
+
+{{range .Data.Warnings}}<p class="warn">{{.}}</p>{{end}}
+
+<section class="card">
+  <div class="row"><h1>Apps</h1><a class="button primary" href="/apps/new">Add app</a></div>
+  {{if .Data.Apps}}
+  <table class="stack">
+    <thead><tr><th>App</th><th>State</th><th>Domain</th><th>Release</th><th>Memory</th><th>Requests</th><th>Last backup</th><th></th></tr></thead>
+    <tbody>
+    {{range .Data.Apps}}
+    <tr>
+      <td data-label="App"><a href="/apps/{{.Name}}"><b>{{.Name}}</b></a></td>
+      <td data-label="State">{{template "state" .Status.State}}{{if .Pending}} <a class="badge s-deploying" href="/deployments/{{.Pending}}">deploying</a>{{end}}{{if .NeedsRestart}} <span class="badge s-backoff">restart needed</span>{{end}}</td>
+      <td data-label="Domain">{{if .Domain}}<a href="https://{{.Domain}}/" rel="noopener" target="_blank">{{.Domain}}</a>{{else}}<span class="muted">-</span>{{end}}</td>
+      <td data-label="Release">{{if .Status.Release}}<code>{{.Status.Release}}</code>{{else}}<span class="muted">-</span>{{end}}</td>
+      <td data-label="Memory" class="nowrap">{{if .MemBytes}}{{bytes .MemBytes}}{{else}}<span class="muted">-</span>{{end}}</td>
+      <td data-label="Requests" class="nowrap">{{.Requests}}{{if .Requests5xx}} <small class="error-text">({{.Requests5xx}} 5xx)</small>{{end}}</td>
+      <td data-label="Last backup" class="nowrap">{{if .BackupProblem}}<span class="badge s-failed" title="{{.BackupProblem}}">backup failed</span>{{else}}{{ago .LastBackup}}{{end}}</td>
+      <td class="end"><a href="/apps/{{.Name}}/logs">Logs</a></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">No apps yet. <a href="/apps/new">Add your first app</a>.</p>
+  {{end}}
+</section>
+</div>
+{{end}}
