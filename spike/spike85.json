@@ -1,0 +1,35 @@
+{
+ "root": "/var/lib/phpboat-spike",
+ "apps": [
+  {
+   "name": "hello",
+   "host": "hello.test",
+   "php": "8.5",
+   "src": "/root/spike/samples/hello"
+  },
+  {
+   "name": "uploads",
+   "host": "uploads.test",
+   "php": "8.5",
+   "src": "/root/spike/samples/uploads"
+  },
+  {
+   "name": "composer",
+   "host": "composer.test",
+   "php": "8.5",
+   "src": "/root/spike/samples/composer"
+  },
+  {
+   "name": "cron",
+   "host": "cron.test",
+   "php": "8.5",
+   "src": "/root/spike/samples/cron"
+  },
+  {
+   "name": "site",
+   "host": "site.test",
+   "php": "8.5",
+   "src": "/root/spike/samples/site"
+  }
+ ]
+}

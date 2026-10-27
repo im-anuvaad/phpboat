@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026), not implemented yet.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phase 1 done ([results](phase1-results.md)), implementation from phase 2.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -43,6 +43,7 @@ Everything else from binboat stays as decided there: Cloudflare-only edge (Origi
 ## 3. PHP on the host
 
 - `install.sh` installs, with `apt-get install -y --no-install-recommends`, the distro-default metapackages: `php-fpm php-cli php-sqlite3 php-mbstring php-xml php-curl php-intl php-zip php-gd php-bcmath unzip` (+ `php8.3-opcache` on 24.04; OPcache is built in on 8.5). The same list works on both releases. **The set is fixed**: apps can't add extensions; `composer check-platform-reqs` at deploy names any missing one.
+- `php<ver>-fpm` itself is in **universe** on both releases (cli, common and the extensions are in main). It is built from the same source package and published in the `-security` pocket together with them (phase 1, F1), so it gets the same fixes; the installer checks that the `-security` pocket is enabled.
 - It **stops and masks** `php<ver>-fpm.service`, because phpboat runs its own masters.
 - **Composer**: a pinned `composer.phar`, downloaded from getcomposer.org and SHA-256 checked by `install.sh`, installed at `/usr/local/lib/phpboat/composer.phar` and run with the host's PHP CLI. Re-running the installer updates it with phpboat.
 - **PHP security updates** come from apt (`unattended-upgrades` is on by default on Ubuntu). A running FPM master keeps the old code until it restarts, so phpboat checks the installed `php-fpm` package version every 10 minutes. When it changes, phpboat restarts the pools one at a time (a few seconds of downtime each) and notes it in each app's log.
@@ -58,9 +59,9 @@ The router is binboat's (`Host` → app, Host must equal SNI, 503/502 pages, cou
 4. A directory → its `index.php` (run) or `index.html` (served); no directory listings.
 5. Otherwise, if `<docroot>/index.php` exists → run it (front controller, so pretty URLs work); else 404.
 
-FastCGI parameters are set by phpboat, so apps need no proxy config: `REMOTE_ADDR` = `CF-Connecting-IP`, `HTTPS=on`, `REQUEST_SCHEME=https`, `SERVER_NAME`/`HTTP_HOST` = the domain, `SERVER_PORT=443`, `DOCUMENT_ROOT`, `SCRIPT_FILENAME`, `SCRIPT_NAME`, `REQUEST_URI`, `QUERY_STRING`, `CONTENT_*`. Incoming `X-Forwarded-*` headers are dropped (phpboat sets the true values). Bodies are streamed (Cloudflare caps them at 100 MB). Responses are streamed and flushed, so `flush()`/SSE works.
+Request headers are capped at 32 KB (Cloudflare's own limit) → 431; FPM drops larger params with a broken pipe (F7). FastCGI parameters are set by phpboat, so apps need no proxy config: `REMOTE_ADDR` = `CF-Connecting-IP`, `HTTPS=on`, `REQUEST_SCHEME=https`, `SERVER_NAME`/`HTTP_HOST` = the domain, `SERVER_PORT=443`, `DOCUMENT_ROOT`, `SCRIPT_FILENAME`, `SCRIPT_NAME`, `REQUEST_URI`, `QUERY_STRING`, `CONTENT_*`. Incoming `X-Forwarded-*` headers are dropped (phpboat sets the true values). Bodies are streamed (Cloudflare caps them at 100 MB). Responses are streamed and flushed, so `flush()`/SSE works.
 
-The FastCGI client is phpboat's own (`internal/fastcgi`, ~400 lines, fuzzed): the Go stdlib only has the server side, and the protocol is small. One connection per request (unix socket, cheap); FPM's `listen.backlog` absorbs bursts; a full pool → 503 after 10 s.
+The FastCGI client is phpboat's own (`internal/fastcgi`, ~400 lines, fuzzed): the Go stdlib only has the server side, and the protocol is small. One connection per request (unix socket, cheap); FPM's `listen.backlog` (256) absorbs bursts (no errors at c=128 against 4 workers in phase 1); a full backlog → 503. Requirements from the phase 1 profile (F8): pooled buffers, no goroutine or pipe per request, records read straight from the connection, params split across records, flush when FPM pauses rather than after every chunk. PHP error lines arrive as FastCGI `STDERR` records and go to the app log with the request's method and path (F10).
 
 ## 5. Deploys
 
@@ -76,7 +77,7 @@ The FastCGI client is phpboat's own (`internal/fastcgi`, ~400 lines, fuzzed): th
    top-level <owner>-<repo>-<sha>/ directory.
 3. phpboat.toml (optional) parsed and validated; docroot must exist.
    composer.json present → composer.lock required (else: "commit your composer.lock").
-4. Prepare, as the app user, in a build cgroup (1 CPU, 512 MB, 10 min, network on):
+4. Prepare, as the app user, in a build cgroup (1 CPU, 256 MB, 10 min, network on; phase 1 measured ≤ 65 MB):
      php composer.phar install --no-dev --no-interaction --no-progress --prefer-dist
                                --optimize-autoloader
      php composer.phar check-platform-reqs --no-dev
@@ -111,7 +112,7 @@ persist      = []                  # e.g. ["public/uploads", "storage"]
 before_start = []                  # e.g. ["bin/migrate.php"], run with php before each start
 
 [php]                              # a short allowlist, nothing else
-memory_limit        = "128M"
+memory_limit        = "64M"       # default: app memory ÷ concurrency (F4)
 max_execution_time  = 30
 upload_max_filesize = "20M"        # post_max_size follows it
 max_input_vars      = 1000
@@ -143,13 +144,15 @@ Schedule, retention, bucket layout, upload retries and badges stay as in binboat
 
 ## 8. Processes and limits
 
-Per app, phpboat writes `apps/<app>/run/php-fpm.conf` (root-owned, no secrets) and starts `php-fpm<ver> -F -y <that file>` exactly as binboat starts an app binary: in the app's cgroup, as its user, with a clean env (`clear_env = no` hands that env to the workers, so env values are never written to a file). Socket `apps/<app>/run/php.sock`, `0600` app user; phpboat (root) connects.
+Per app, phpboat writes `apps/<app>/run/php-fpm.conf` (root-owned, no secrets) and starts `php-fpm<ver> -F -O -y <that file>` exactly as binboat starts an app binary: in the app's cgroup, as its user, with a clean env (`clear_env = no` hands that env to the workers, so env values are never written to a file). Socket `apps/<app>/run/php.sock`, `0600` app user; phpboat (root) connects. The stdout/stderr pipes are created by phpboat and `fchown`ed to the app user, because FPM reopens `/proc/self/fd/2` and fails on a root-owned pipe (F2). `[global]`: `error_log = /proc/self/fd/2`, `systemd_interval = 0` (F9), `process_control_timeout = 10s`; stop = `SIGQUIT` (graceful, 89 ms for 5 idle pools).
 
 | Setting | Value |
 |---|---|
 | Pool | `pm = ondemand`, `pm.max_children = 4` ("concurrency", editable 1–16), `pm.process_idle_timeout = 30s`, `pm.max_requests = 500`, `request_terminate_timeout = 95s` (just under Cloudflare's 100 s), `catch_workers_output = yes`, `decorate_workers_output = no`, no access log |
-| ini (`php_admin_value`, so `ini_set` can't change them) | `display_errors=0`, `log_errors=1`, `error_log=/dev/stderr`, `expose_php=0`, `open_basedir` = build + `$DATA_DIR` + `$TMPDIR` + sessions, `sys_temp_dir`/`upload_tmp_dir` = `$TMPDIR`, `opcache.enable=1`, `opcache.validate_timestamps=0` (builds are immutable; a deploy restarts the pool), `opcache.memory_consumption=32`, `realpath_cache_size=1M`, `allow_url_include=0`, the `[php]` allowlist from `phpboat.toml` |
-| cgroup | as binboat: memory 256 MB (no swap), CPU 1, pids 256, files 4096; covers the FPM master, its workers and cron jobs. The build cgroup is separate (§5). |
+| ini (`php_admin_value`, so `ini_set` can't change them) | `display_errors=0`, `log_errors=1` (no `error_log`: errors go to FastCGI STDERR, F10), `memory_limit` = app memory ÷ concurrency unless set (F4), `expose_php=0`, `open_basedir` = build + `$DATA_DIR` + `$TMPDIR` + sessions, `sys_temp_dir`/`upload_tmp_dir` = `$TMPDIR`, `opcache.enable=1`, `opcache.validate_timestamps=0` (builds are immutable; a deploy restarts the pool), `opcache.memory_consumption=32`, `opcache.interned_strings_buffer=4`, `opcache.jit=disable`, `realpath_cache_size=1M`, `allow_url_include=0`, the `[php]` allowlist from `phpboat.toml` |
+| cgroup | as binboat: memory 256 MB (no swap), CPU 1, pids 256, files 4096; covers the FPM master, its workers and cron jobs. The build cgroup is separate (§5). If `memory_limit × concurrency` exceeds the app's memory, the app page warns: concurrent big requests then get OOM-killed workers (502) instead of PHP errors (F4). |
+| Monitoring | the memory chart shows anon + shmem + kernel ("app memory"), since `memory.current` also counts reclaimable page cache charged to whichever app touched shared files first (F5) |
+| Start | phpboat kills every PID left in the app cgroups before starting anything: after a `kill -9` of phpboat, FPM workers survive inside their cgroups (F6) |
 | Health | FastCGI `GET health_path` (2xx/3xx within 30 s); FPM's `pm.status_path` (internal only, never routed) feeds "active/idle workers" and "max children reached" into monitoring |
 
 The supervisor state machine, restart backoff (5 exits in 5 min → crashed), log capture, OOM detection and kill-by-PID (binboat D10) are unchanged. binboat's `GOMEMLIMIT` for apps is gone.
@@ -175,20 +178,20 @@ The supervisor state machine, restart backoff (5 exits in 5 min → crashed), lo
 
 The database starts from **one fresh migration** (phpboat has never been released, so binboat's 8 migrations and their unused columns are squashed): `releases` becomes `builds` (id, commit SHA, subject, author, committed at, sha256 of the tarball, manifest JSON), `apps` gains `branch`, `concurrency`, and a `cron_runs` table keeps the last 20 runs per job.
 
-## 10. Memory budget (P15)
+## 10. Memory budget (P15) — measured ✅
 
-Measured in phase 1 on a real 1 GB VPS (both Ubuntu releases), with 5 sample plain-PHP apps (SQLite page, uploads, Composer dependency, cron job, 404-heavy static site):
+Phase 1, on a real VPS with 5 plain-PHP apps, both PHP versions ([details](phase1-results.md)):
 
-| | Target |
-|---|---|
-| phpboat idle RSS | < 30 MB (as binboat) |
-| One idle app (FPM master, no workers with `ondemand`) | < 15 MB |
-| 5 idle apps + phpboat | < 120 MB |
-| One app under load, 4 workers | < 120 MB (within its 256 MB cgroup) |
-| `composer install` of a small app from a lock | < 200 MB, one at a time |
-| FastCGI + static overhead vs php-fpm behind nginx | < 1 ms p50 |
+| | Target | Measured (8.5 / 8.3) |
+|---|---|---|
+| phpboat idle RSS | < 30 MB | binboat: 26.6 MB (same code base) |
+| One idle app (FPM master, no workers with `ondemand`) | < 15 MB | 10.6–11.0 / 9.4–9.7 MB |
+| 5 idle apps + phpboat | < 120 MB | ≈ 81 / ≈ 75 MB |
+| One app under load, 4 workers | < 120 MB | 14–39 MB |
+| `composer install` from a lock | < 200 MB | 28–58 MB (7 heavier packages: 58 MB) |
+| FastCGI + static overhead vs nginx | < 1 ms p50 | +0.5 ms p50 on PHP pages; static p50 110 µs vs 320 µs |
 
-If the targets fail, the knobs are `opcache.memory_consumption`, the default concurrency, and `pm.process_idle_timeout`, in that order; "1 GB is enough" is dropped from the README only if they can't be met.
+The knobs (`opcache.memory_consumption`, default concurrency, `pm.process_idle_timeout`) stay as planned; none needed changing. "1 GB is enough" stays in the README.
 
 ## 11. State of the code (phase 0, done)
 
@@ -207,8 +210,8 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 | Phase | Work | Done when |
 |---|---|---|
 | **0. Baseline** ✅ | Copy, rename, strip binboat-only parts (§11) | builds and tests pass |
-| **1. Spike + budget** | On real 1 GB VPSes (24.04 and 26.04): apt PHP, a hand-written `php-fpm -F` pool under a user + cgroup, a throwaway FastCGI client, the 5 sample apps (own repos, `im-anuvaad/phpboat-sample-*`) | §10 numbers measured and written into the architecture doc; go / no-go on P2–P5 |
-| **2. FastCGI + static** | `internal/fastcgi` (client, params, streaming, fuzz tests); `internal/phpserve` (routing rules §4, static files, P14, docroot `.` denylist) | unit tests + an integration test against a real php-fpm in CI (`apt install php-fpm`) |
+| **1. Spike + budget** ✅ | On a real VPS (26.04, plus PHP 8.3 from a 24.04 rootfs): apt PHP, a hand-written `php-fpm -F` pool under a user + cgroup, a throwaway FastCGI client, the 5 sample apps (in `spike/samples/` for now; own repos in phase 4) | §10 measured, [results](phase1-results.md): **go** on P2–P5 |
+| **2. FastCGI + static** | `internal/fastcgi` (client, params, streaming, fuzz tests); `internal/phpserve` (routing rules §4, static files, P14, docroot `.` denylist) | unit tests + an integration test against a real php-fpm in CI (`apt install php-fpm`); `spike/check.sh` passes against it; beats the spike's numbers (F8) |
 | **3. PHP runtime** | `internal/php` (pool + ini rendering, version detection, package-version watch); supervisor spawns FPM; health over FastCGI; edge router uses phpserve instead of the reverse proxy; contract env (no `PORT`/`HOST`) | an app dir prepared by hand serves through Cloudflare on a VPS |
 | **4. Source deploys** | `github` (branches, commits, tarball); `manifest` → `phpboat.toml` + defaults; deployer prepare stage (Composer, build cgroup), builds keyed by SHA, persist links, `before_start`; squashed migration; dashboard: Add app with branch, commits list, Rebuild; delete the release/asset code | deploy, redeploy, rollback, broken Composer, failing `before_start`, all on a VPS |
 | **5. Full-data backups** | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server |
