@@ -1,8 +1,9 @@
-// Package deployer implements the deploy pipeline (docs/architecture.md
-// §7): GitHub release → download + checksum → safe unpack → phpboat.toml and
-// ELF check → stop old → pre-deploy backup → switch → start + health check,
-// with automatic rollback when the new release is unhealthy. phpboat never
-// builds anything.
+// Package deployer implements the deploy pipeline: GitHub release →
+// download + checksum → safe unpack → phpboat.toml and docroot check →
+// stop old → pre-deploy backup → switch → start php-fpm + health check,
+// with automatic rollback when the new release is unhealthy. Until phase 4
+// (docs/plan.md §12) releases are still GitHub release tarballs; phase 4
+// fetches commits and runs composer instead.
 //
 // All deploys and rollbacks on the host run one at a time from a single
 // queue.
@@ -58,7 +59,7 @@ const (
 
 // AppConfig is the deploy configuration of one app.
 type AppConfig struct {
-	Base app.Spec // name, domain, port, env, limits (no release fields)
+	Base app.Spec // name, domain, concurrency, env, limits (no release fields)
 	Repo github.Repo
 }
 
@@ -174,8 +175,9 @@ func (d *Deployer) specFor(cfg AppConfig, r Release) app.Spec {
 	s := cfg.Base
 	s.ReleaseID = r.ID
 	s.ReleaseDir = d.Layout.ReleaseDir(s.Name, r.ID)
-	s.Run = r.Run
-	s.HealthPath = r.HealthPath
+	s.Docroot = r.Manifest.Docroot
+	s.HealthPath = r.Manifest.HealthPath
+	s.PHP = r.Manifest.PHP
 	return s
 }
 
@@ -480,7 +482,7 @@ func (d *Deployer) deploy(ctx context.Context, cfg AppConfig, j job, lg *logs.Lo
 	if err != nil {
 		return err
 	}
-	lg.Writef("phpboat.toml: run %q, health %s", strings.Join(m.Run, " "), m.HealthPath)
+	lg.Writef("phpboat.toml: docroot %q, health %s, php settings %v", m.Docroot, m.HealthPath, m.PHP)
 
 	// 4. Keep it as an immutable release (root-owned, read-only to the app).
 	relDir := d.Layout.ReleaseDir(name, tag)
@@ -492,7 +494,7 @@ func (d *Deployer) deploy(ctx context.Context, cfg AppConfig, j job, lg *logs.Lo
 	if subject == "" {
 		subject = tag
 	}
-	kept := Release{App: name, ID: tag, Subject: subject, SHA256: got, Run: m.Run, HealthPath: m.HealthPath, CreatedAt: time.Now()}
+	kept := Release{App: name, ID: tag, Subject: subject, SHA256: got, Manifest: m, CreatedAt: time.Now()}
 	if err := d.insertRelease(ctx, kept); err != nil {
 		os.RemoveAll(relDir)
 		return fmt.Errorf("record release: %w", err)
@@ -519,17 +521,10 @@ func (d *Deployer) rollback(ctx context.Context, cfg AppConfig, j job, lg *logs.
 	return d.activate(ctx, cfg, rel, j.id, lg)
 }
 
-// releaseIntact reports whether a kept release's binary is still on disk.
+// releaseIntact reports whether a kept release's docroot is still on disk.
 func (d *Deployer) releaseIntact(rel Release) bool {
-	if len(rel.Run) == 0 {
-		return false
-	}
-	bin := rel.Run[0]
-	if !filepath.IsAbs(bin) {
-		bin = filepath.Join(d.Layout.ReleaseDir(rel.App, rel.ID), bin)
-	}
-	fi, err := os.Stat(bin)
-	return err == nil && fi.Mode().IsRegular()
+	fi, err := os.Stat(filepath.Join(d.Layout.ReleaseDir(rel.App, rel.ID), rel.Manifest.Docroot))
+	return err == nil && fi.IsDir()
 }
 
 // activate stops the old release, runs the pre-deploy hook, switches the

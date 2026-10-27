@@ -11,12 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	"github.com/im-anuvaad/phpboat/internal/app"
 	"github.com/im-anuvaad/phpboat/internal/cgroup"
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/logs"
+	"github.com/im-anuvaad/phpboat/internal/php"
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
 
@@ -26,6 +28,18 @@ type Deps struct {
 	Cgroups *cgroup.Manager
 	Log     *slog.Logger
 	Policy  Policy // zero value = DefaultPolicy
+	Web     Web
+}
+
+// Web is how apps are run and served.
+type Web struct {
+	// PHP returns the host's PHP (php.Detect); an error keeps apps from
+	// starting with that message.
+	PHP func() (php.Runtime, error)
+	// ClientIP is the visitor's IP (edge.ClientIP).
+	ClientIP func(*http.Request) string
+	// ErrorPage writes phpboat's error pages (404, 502, 503 ...).
+	ErrorPage func(http.ResponseWriter, *http.Request, int)
 }
 
 // Supervisor owns all app actors.
@@ -62,11 +76,6 @@ func (s *Supervisor) Add(spec app.Spec) (*App, error) {
 	if _, ok := s.apps[spec.Name]; ok {
 		return nil, fmt.Errorf("supervisor: app %q already exists", spec.Name)
 	}
-	for _, other := range s.apps {
-		if other.Spec().Port == spec.Port {
-			return nil, fmt.Errorf("supervisor: port %d already used by %q", spec.Port, other.Spec().Name)
-		}
-	}
 
 	u, err := users.Ensure(spec.Name)
 	if err != nil {
@@ -87,7 +96,7 @@ func (s *Supervisor) Add(spec app.Spec) (*App, error) {
 		return nil, err
 	}
 
-	a := newApp(spec, s.deps.Layout, u, g, lg, s.deps.Policy, s.deps.Log.With("app", spec.Name))
+	a := newApp(spec, s.deps.Layout, u, g, lg, s.deps.Policy, s.deps.Log.With("app", spec.Name), s.deps.Web)
 	s.apps[spec.Name] = a
 	s.order = append(s.order, spec.Name)
 	go a.loop()

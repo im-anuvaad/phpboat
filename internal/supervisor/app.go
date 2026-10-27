@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,8 +19,11 @@ import (
 
 	"github.com/im-anuvaad/phpboat/internal/app"
 	"github.com/im-anuvaad/phpboat/internal/cgroup"
+	"github.com/im-anuvaad/phpboat/internal/fastcgi"
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/logs"
+	"github.com/im-anuvaad/phpboat/internal/php"
+	"github.com/im-anuvaad/phpboat/internal/phpserve"
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
 
@@ -39,7 +43,7 @@ const (
 // Policy holds the timing rules (docs/architecture.md).
 type Policy struct {
 	HealthTimeout  time.Duration // max time from spawn to healthy
-	StopGrace      time.Duration // SIGTERM → SIGKILL
+	StopGrace      time.Duration // SIGQUIT (FPM's graceful stop) → SIGKILL
 	BackoffMin     time.Duration
 	BackoffMax     time.Duration
 	CrashWindow    time.Duration
@@ -110,8 +114,9 @@ type healthEvent struct {
 	err error
 }
 
-// App is one supervised app. All mutable process state is owned by the
-// loop goroutine; Status() reads a mutex-protected snapshot.
+// App is one supervised app: a php-fpm master for its current release,
+// and the phpserve handler in front of it. All mutable process state is
+// owned by the loop goroutine; Status() reads a mutex-protected snapshot.
 type App struct {
 	dirs   layout.Layout
 	user   users.User
@@ -119,6 +124,9 @@ type App struct {
 	log    *logs.Log
 	policy Policy
 	slog   *slog.Logger
+	web    Web
+
+	site atomic.Pointer[phpserve.Site] // handler of the current process
 
 	cmds     chan command
 	exitCh   chan exitEvent
@@ -145,9 +153,9 @@ type App struct {
 	healthCancel context.CancelFunc
 }
 
-func newApp(spec app.Spec, dirs layout.Layout, u users.User, g *cgroup.Group, lg *logs.Log, p Policy, l *slog.Logger) *App {
+func newApp(spec app.Spec, dirs layout.Layout, u users.User, g *cgroup.Group, lg *logs.Log, p Policy, l *slog.Logger, w Web) *App {
 	a := &App{
-		dirs: dirs, user: u, group: g, log: lg, policy: p, slog: l,
+		dirs: dirs, user: u, group: g, log: lg, policy: p, slog: l, web: w,
 		cmds:     make(chan command),
 		exitCh:   make(chan exitEvent, 1),
 		healthCh: make(chan healthEvent, 1),
@@ -176,6 +184,15 @@ func (a *App) Status() Status {
 	return a.status
 }
 
+// Handler serves the app's requests (static files + PHP), or nil when it
+// has never been started. The router only uses it while the app is running.
+func (a *App) Handler() http.Handler {
+	if s := a.site.Load(); s != nil {
+		return s
+	}
+	return nil
+}
+
 // Log returns the app's log (for live tailing).
 func (a *App) Log() *logs.Log { return a.log }
 
@@ -185,7 +202,8 @@ func (a *App) Group() *cgroup.Group { return a.group }
 // Start starts the app and waits until it is healthy or has failed.
 func (a *App) Start(ctx context.Context) error { return a.do(ctx, command{op: opStart}) }
 
-// Stop stops the app (SIGTERM, grace period, then kill the whole cgroup).
+// Stop stops the app (SIGQUIT: FPM finishes running requests; after the
+// grace period the whole cgroup is killed).
 func (a *App) Stop(ctx context.Context) error { return a.do(ctx, command{op: opStop}) }
 
 // Restart stops then starts the app.
@@ -271,7 +289,7 @@ func (a *App) loop() {
 			a.spawn()
 		case <-timerC(a.stopTimer):
 			a.stopTimer = nil
-			a.log.Writef("did not exit within %s after SIGTERM; killing", a.policy.StopGrace)
+			a.log.Writef("did not exit within %s after SIGQUIT; killing", a.policy.StopGrace)
 			a.killGroup()
 		case <-oom.C:
 			a.checkOOM()
@@ -320,9 +338,9 @@ func (a *App) handleStop(reply chan error) {
 		a.stopWaiters = append(a.stopWaiters, reply)
 		a.replyStart(ErrStopped)
 		a.setStatus(func(s *Status) { s.State = Stopping })
-		a.log.Writef("stopping (SIGTERM to pid %d)", a.cmd.Process.Pid)
-		if err := a.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			a.slog.Warn("SIGTERM failed", "err", err)
+		a.log.Writef("stopping (SIGQUIT to php-fpm pid %d)", a.cmd.Process.Pid)
+		if err := a.cmd.Process.Signal(syscall.SIGQUIT); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			a.slog.Warn("SIGQUIT failed", "err", err)
 		}
 		a.stopTimer = time.NewTimer(a.policy.StopGrace)
 	}
@@ -355,7 +373,7 @@ func (a *App) spawn() {
 	a.gen++
 	a.pendingErr = nil
 	spec := a.Spec()
-	cmd, err := a.startProcess(spec)
+	cmd, site, err := a.startProcess(spec)
 	if err != nil {
 		a.log.Writef("failed to start: %v", err)
 		a.setStatus(func(s *Status) { s.LastError = err.Error() })
@@ -368,7 +386,7 @@ func (a *App) spawn() {
 		s.State, s.PID, s.StartedAt, s.HealthyAt, s.NextStart = Starting, cmd.Process.Pid, now, time.Time{}, time.Time{}
 		s.Release = spec.ReleaseID
 	})
-	a.log.Writef("started pid %d (release %s): %s", cmd.Process.Pid, spec.ReleaseID, strconv.Quote(joinArgs(spec.Run)))
+	a.log.Writef("started php-fpm %s, pid %d (release %s, %d workers)", cmd.Path, cmd.Process.Pid, spec.ReleaseID, spec.Concurrency)
 
 	gen := a.gen
 	go func() {
@@ -390,7 +408,7 @@ func (a *App) spawn() {
 			case <-hctx.Done():
 			}
 		}()
-		err := healthCheck(hctx, spec, a.policy)
+		err := healthCheck(hctx, site, a.dirs.Socket(spec.Name), spec, a.policy)
 		select {
 		case a.healthCh <- healthEvent{gen: gen, err: err}:
 		case <-a.quit:
@@ -398,37 +416,73 @@ func (a *App) spawn() {
 	}()
 }
 
-func (a *App) startProcess(spec app.Spec) (*exec.Cmd, error) {
-	bin := spec.Run[0]
-	if !filepath.IsAbs(bin) {
-		bin = filepath.Join(spec.ReleaseDir, bin)
+// startProcess writes the pool config and starts php-fpm in the app's
+// cgroup as the app user. It returns the handler for the release.
+func (a *App) startProcess(spec app.Spec) (*exec.Cmd, *phpserve.Site, error) {
+	if a.web.PHP == nil {
+		return nil, nil, php.ErrNotInstalled
 	}
-	st, err := os.Stat(bin)
+	rt, err := a.web.PHP()
 	if err != nil {
-		return nil, fmt.Errorf("run binary: %w", err)
+		return nil, nil, err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o001 == 0 {
-		return nil, fmt.Errorf("run binary %s must be a regular file executable by others (mode %s)", bin, st.Mode())
+	sock := a.dirs.Socket(spec.Name)
+	site, err := phpserve.New(phpserve.Config{
+		Build: spec.ReleaseDir, Docroot: spec.Docroot, DataDir: a.dataDir(spec),
+		FastCGI:  &fastcgi.Client{Address: sock},
+		ClientIP: a.web.ClientIP,
+		Error:    a.web.ErrorPage,
+		SpoolDir: a.tmpDir(spec),
+		PHPLog: func(r *http.Request, line string) {
+			a.log.Write(logs.Stderr, r.Method+" "+r.URL.Path+": "+line)
+		},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("release %s: %w", spec.ReleaseID, err)
+	}
+	pool := php.Pool{
+		App: spec.Name, Build: spec.ReleaseDir, DataDir: a.dataDir(spec), TmpDir: a.tmpDir(spec),
+		SessionsDir: a.dirs.SessionsDir(spec.Name), Socket: sock,
+		Concurrency: spec.Concurrency, MemoryMax: spec.Limits.MemoryMax, Settings: spec.PHP,
+	}
+	conf, err := pool.Config()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := writeFileAtomic(a.dirs.FPMConfig(spec.Name), []byte(conf), 0o644); err != nil {
+		return nil, nil, err
+	}
+	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, fmt.Errorf("remove stale socket: %w", err)
 	}
 
 	fd, err := a.group.OpenFD()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer unix.Close(fd)
 
+	// The pipes belong to the app user: FPM reopens /proc/self/fd/2 for its
+	// error_log, which fails with EACCES on a root-owned pipe (phase 1, F2).
 	outR, outW, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
 		outR.Close()
 		outW.Close()
-		return nil, err
+		return nil, nil, err
+	}
+	closeAll := func() { outR.Close(); outW.Close(); errR.Close(); errW.Close() }
+	for _, w := range []*os.File{outW, errW} {
+		if err := w.Chown(int(a.user.UID), int(a.user.GID)); err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("log pipe: %w", err)
+		}
 	}
 
-	cmd := exec.Command(bin, spec.Run[1:]...)
+	cmd := exec.Command(rt.FPM, "-F", "-O", "-y", a.dirs.FPMConfig(spec.Name))
 	cmd.Dir = spec.ReleaseDir
 	cmd.Env = a.environ(spec)
 	cmd.Stdout, cmd.Stderr = outW, errW
@@ -445,7 +499,7 @@ func (a *App) startProcess(spec app.Spec) (*exec.Cmd, error) {
 	if err != nil {
 		outR.Close()
 		errR.Close()
-		return nil, err
+		return nil, nil, err
 	}
 
 	lim := &unix.Rlimit{Cur: a.policy.NoFile, Max: a.policy.NoFile}
@@ -455,7 +509,19 @@ func (a *App) startProcess(spec app.Spec) (*exec.Cmd, error) {
 
 	go func() { a.log.Capture(logs.Stdout, outR); outR.Close() }()
 	go func() { a.log.Capture(logs.Stderr, errR); errR.Close() }()
-	return cmd, nil
+	a.site.Store(site)
+	return cmd, site, nil
+}
+
+func writeFileAtomic(path string, b []byte, mode os.FileMode) error {
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, b, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // environ builds the contract environment (docs/app-contract.md §3). The
@@ -469,8 +535,6 @@ func (a *App) environ(spec app.Spec) []string {
 		env[k] = v
 	}
 	contract := map[string]string{
-		"PORT":             strconv.Itoa(spec.Port),
-		"HOST":             "127.0.0.1",
 		"DATA_DIR":         a.dataDir(spec),
 		"TMPDIR":           a.tmpDir(spec),
 		"PHPBOAT_APP":      spec.Name,
@@ -632,17 +696,6 @@ func describeExit(ev exitEvent) string {
 		return "killed by signal " + unix.SignalName(ws.Signal())
 	}
 	return "exit code " + strconv.Itoa(ps.ExitCode())
-}
-
-func joinArgs(args []string) string {
-	s := ""
-	for i, a := range args {
-		if i > 0 {
-			s += " "
-		}
-		s += a
-	}
-	return s
 }
 
 func formatBytes(n int64) string {

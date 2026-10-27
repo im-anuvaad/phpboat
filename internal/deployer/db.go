@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/im-anuvaad/phpboat/internal/manifest"
 )
 
 // Deployment statuses.
@@ -43,14 +45,13 @@ func (d Deployment) Done() bool { return d.Status == StatusSucceeded || d.Status
 
 // Release is a GitHub release unpacked on the server (at most KeepReleases).
 type Release struct {
-	App        string    `json:"app"`
-	ID         string    `json:"id"`      // the tag
-	Subject    string    `json:"subject"` // the release name
-	SHA256     string    `json:"sha256"`  // of the tarball
-	Run        []string  `json:"run"`
-	HealthPath string    `json:"health_path"`
-	CreatedAt  time.Time `json:"created_at"`
-	Current    bool      `json:"current"`
+	App       string            `json:"app"`
+	ID        string            `json:"id"`      // the tag
+	Subject   string            `json:"subject"` // the release name
+	SHA256    string            `json:"sha256"`  // of the tarball
+	Manifest  manifest.Manifest `json:"manifest"`
+	CreatedAt time.Time         `json:"created_at"`
+	Current   bool              `json:"current"`
 }
 
 func unix(t time.Time) int64 {
@@ -143,11 +144,14 @@ func (d *Deployer) Deployments(ctx context.Context, app string, limit int) ([]De
 }
 
 func (d *Deployer) insertRelease(ctx context.Context, r Release) error {
-	run, _ := json.Marshal(r.Run)
-	_, err := d.db.Writer().ExecContext(ctx, `INSERT INTO releases
-		(app, id, git_sha, subject, branch, subdir, zig_version, sha256, run, health_path, created_at)
-		VALUES (?, ?, '', ?, '', '', '', ?, ?, ?, ?)`,
-		r.App, r.ID, r.Subject, r.SHA256, string(run), r.HealthPath, unix(r.CreatedAt))
+	m, err := json.Marshal(r.Manifest)
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Writer().ExecContext(ctx, `INSERT INTO releases
+		(app, id, git_sha, subject, branch, subdir, zig_version, sha256, run, health_path, manifest, created_at)
+		VALUES (?, ?, '', ?, '', '', '', ?, '[]', ?, ?, ?)`,
+		r.App, r.ID, r.Subject, r.SHA256, r.Manifest.HealthPath, string(m), unix(r.CreatedAt))
 	return err
 }
 
@@ -182,7 +186,7 @@ func (d *Deployer) Releases(ctx context.Context, app string) ([]Release, error) 
 }
 
 func (d *Deployer) queryReleases(ctx context.Context, where string, args ...any) ([]Release, error) {
-	rows, err := d.db.Reader().QueryContext(ctx, `SELECT app, id, subject, sha256, run, health_path, created_at
+	rows, err := d.db.Reader().QueryContext(ctx, `SELECT app, id, subject, sha256, manifest, created_at
 		FROM releases `+where, args...)
 	if err != nil {
 		return nil, err
@@ -191,13 +195,14 @@ func (d *Deployer) queryReleases(ctx context.Context, where string, args ...any)
 	var out []Release
 	for rows.Next() {
 		var r Release
-		var run string
+		var m string
 		var created int64
-		if err := rows.Scan(&r.App, &r.ID, &r.Subject, &r.SHA256, &run, &r.HealthPath, &created); err != nil {
+		if err := rows.Scan(&r.App, &r.ID, &r.Subject, &r.SHA256, &m, &created); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(run), &r.Run); err != nil {
-			return nil, fmt.Errorf("release %s: bad run column: %w", r.ID, err)
+		r.Manifest = manifest.Default()
+		if err := json.Unmarshal([]byte(m), &r.Manifest); err != nil {
+			return nil, fmt.Errorf("release %s: bad manifest column: %w", r.ID, err)
 		}
 		r.CreatedAt = fromUnix(created)
 		out = append(out, r)

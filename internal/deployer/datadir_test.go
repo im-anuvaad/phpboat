@@ -10,6 +10,7 @@ import (
 
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/logs"
+	"github.com/im-anuvaad/phpboat/internal/manifest"
 	"github.com/im-anuvaad/phpboat/internal/store"
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
@@ -67,7 +68,7 @@ func TestDataDirSurvivesRedeploys(t *testing.T) {
 		if err := os.MkdirAll(l.ReleaseDir(name, tag), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		r := Release{App: name, ID: tag, Run: []string{"app"}, HealthPath: "/", CreatedAt: time.Unix(int64(1000+i), 0)}
+		r := Release{App: name, ID: tag, Manifest: manifest.Default(), CreatedAt: time.Unix(int64(1000+i), 0)}
 		if err := d.insertRelease(ctx, r); err != nil {
 			t.Fatal(err)
 		}

@@ -12,15 +12,17 @@ import (
 
 // ContractVersion is the app contract version phpboat implements
 // (docs/app-contract.md).
-const ContractVersion = 3
+const ContractVersion = 1
 
-// Default resource limits (docs/app-contract.md §8).
+// Default resource limits (docs/app-contract.md §9).
 const (
-	DefaultMemoryMax  = 256 << 20
-	DefaultCPUMax     = 1.0
-	DefaultPidsMax    = 256
-	DefaultNoFile     = 4096
-	DefaultHealthPath = "/"
+	DefaultMemoryMax   = 256 << 20
+	DefaultCPUMax      = 1.0
+	DefaultPidsMax     = 256
+	DefaultNoFile      = 4096
+	DefaultHealthPath  = "/"
+	DefaultConcurrency = 4  // PHP workers (pm.max_children)
+	MaxConcurrency     = 16 // keep in sync with php.MaxConcurrency
 )
 
 // Limits are the per-app runtime resource limits.
@@ -30,17 +32,19 @@ type Limits struct {
 	PidsMax   int
 }
 
-// Spec is everything the supervisor needs to run one app.
+// Spec is everything the supervisor needs to run one app: an FPM pool
+// for the deployed release, behind phpserve.
 type Spec struct {
-	Name       string
-	Domain     string // informational until Phase 3
-	Port       int
-	ReleaseID  string
-	ReleaseDir string   // working directory; binary paths are relative to it
-	Run        []string // argv; Run[0] is relative to ReleaseDir unless absolute
-	HealthPath string
-	Env        map[string]string // user env vars (reserved names rejected)
-	Limits     Limits
+	Name        string
+	Domain      string
+	ReleaseID   string
+	ReleaseDir  string            // the deployed release (absolute)
+	Docroot     string            // public folder relative to ReleaseDir ("public", ".")
+	HealthPath  string            // GET through FastCGI must answer 2xx/3xx
+	PHP         map[string]string // the [php] settings of phpboat.toml (validated by the manifest)
+	Concurrency int               // PHP workers
+	Env         map[string]string // user env vars (reserved names rejected)
+	Limits      Limits
 }
 
 var (
@@ -49,7 +53,7 @@ var (
 )
 
 // ReservedEnv are env names set by phpboat that users may not override.
-var ReservedEnv = []string{"PORT", "HOST", "DATA_DIR", "TMPDIR"}
+var ReservedEnv = []string{"DATA_DIR", "TMPDIR"}
 
 // ValidateName checks an app name: 2-24 chars, lowercase letters, digits and
 // hyphens, starting with a letter and not ending with a hyphen. The limit
@@ -95,18 +99,20 @@ func (s *Spec) Validate() error {
 	if err := ValidateName(s.Name); err != nil {
 		errs = append(errs, err)
 	}
-	if s.Port < 1024 || s.Port > 65535 {
-		errs = append(errs, fmt.Errorf("app %q: port %d out of range 1024-65535", s.Name, s.Port))
-	}
-	// An app without a release (never deployed) has no release dir or run
-	// command yet.
+	// An app without a release (never deployed) has no release dir yet.
 	if s.ReleaseID != "" {
 		if !strings.HasPrefix(s.ReleaseDir, "/") {
 			errs = append(errs, fmt.Errorf("app %q: release dir must be an absolute path", s.Name))
 		}
-		if len(s.Run) == 0 || s.Run[0] == "" {
-			errs = append(errs, fmt.Errorf("app %q: run command is empty", s.Name))
+		if s.Docroot == "" || strings.HasPrefix(s.Docroot, "/") || s.Docroot == ".." || strings.HasPrefix(s.Docroot, "../") {
+			errs = append(errs, fmt.Errorf("app %q: docroot %q must be a folder inside the release", s.Name, s.Docroot))
 		}
+	}
+	if s.Concurrency == 0 {
+		s.Concurrency = DefaultConcurrency
+	}
+	if s.Concurrency < 1 || s.Concurrency > MaxConcurrency {
+		errs = append(errs, fmt.Errorf("app %q: PHP workers must be between 1 and %d", s.Name, MaxConcurrency))
 	}
 	if s.HealthPath == "" {
 		s.HealthPath = DefaultHealthPath
@@ -153,53 +159,4 @@ func ParseBytes(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid size %q (examples: 256M, 1G)", s)
 	}
 	return v * mult, nil
-}
-
-// SplitCommand splits a run command into argv. It supports single and
-// double quotes and backslash escapes, but no shell features (no pipes,
-// globbing, variables or &&), as specified by the app contract.
-func SplitCommand(s string) ([]string, error) {
-	var (
-		args    []string
-		cur     strings.Builder
-		inArg   bool
-		quote   rune
-		escaped bool
-	)
-	for _, r := range s {
-		switch {
-		case escaped:
-			cur.WriteRune(r)
-			escaped = false
-		case r == '\\' && quote != '\'':
-			escaped, inArg = true, true
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			} else {
-				cur.WriteRune(r)
-			}
-		case r == '\'' || r == '"':
-			quote, inArg = r, true
-		case r == ' ' || r == '\t' || r == '\n':
-			if inArg {
-				args = append(args, cur.String())
-				cur.Reset()
-				inArg = false
-			}
-		default:
-			cur.WriteRune(r)
-			inArg = true
-		}
-	}
-	if escaped || quote != 0 {
-		return nil, fmt.Errorf("unterminated quote or escape in command %q", s)
-	}
-	if inArg {
-		args = append(args, cur.String())
-	}
-	if len(args) == 0 {
-		return nil, errors.New("command is empty")
-	}
-	return args, nil
 }

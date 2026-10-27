@@ -1,16 +1,11 @@
 package edge
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"html"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/netip"
-	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -21,7 +16,6 @@ import (
 type Route struct {
 	Host string
 	App  string
-	Port int
 }
 
 // Availability is an app's readiness for traffic.
@@ -35,12 +29,15 @@ const (
 	NotRunning              // 503 "not running"
 )
 
-// Router routes by Host header to the dashboard or to app proxies.
+// Router routes by Host header to the dashboard or to the apps.
 // Requests on setup connections only ever reach the dashboard.
 type Router struct {
 	Dashboard http.Handler
 	// State tells the router whether app can take traffic.
 	State func(app string) Availability
+	// Handler serves an available app (its phpserve.Site); nil means it
+	// is not ready yet.
+	Handler func(app string) http.Handler
 	// SetupOpen reports whether the setup address is open.
 	SetupOpen func() bool
 	// DashboardReached is told when a request for the dashboard domain
@@ -51,7 +48,7 @@ type Router struct {
 
 	dashHost atomic.Value // string
 	mu       sync.RWMutex
-	routes   map[string]*appProxy
+	routes   map[string]*appRoute
 }
 
 // SetDashboardHost changes the dashboard domain ("" = none).
@@ -63,9 +60,8 @@ func (rt *Router) DashboardHost() string {
 	return h
 }
 
-type appProxy struct {
+type appRoute struct {
 	route Route
-	proxy *httputil.ReverseProxy
 	stats *Stats
 }
 
@@ -74,13 +70,13 @@ func (rt *Router) SetRoutes(routes []Route) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	old := rt.routes
-	rt.routes = map[string]*appProxy{}
+	rt.routes = map[string]*appRoute{}
 	for _, r := range routes {
 		if p, ok := old[r.Host]; ok && p.route == r {
 			rt.routes[r.Host] = p
 			continue
 		}
-		rt.routes[r.Host] = rt.newProxy(r)
+		rt.routes[r.Host] = &appRoute{route: r, stats: &Stats{}}
 	}
 }
 
@@ -93,39 +89,6 @@ func (rt *Router) Stats() map[string]StatsSnapshot {
 		out[p.route.App] = p.stats.Snapshot()
 	}
 	return out
-}
-
-func (rt *Router) newProxy(r Route) *appProxy {
-	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(r.Port))}
-	tr := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:          64,
-		MaxIdleConnsPerHost:   32,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		// No response timeout: long-polling and streaming must work.
-	}
-	p := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
-			pr.Out.Host = pr.In.Host // apps see their own domain
-			ip := ClientIP(pr.In)
-			pr.Out.Header.Set("X-Forwarded-For", ip)
-			pr.Out.Header.Set("X-Real-IP", ip)
-			pr.Out.Header.Set("X-Forwarded-Proto", "https")
-			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
-		},
-		Transport:     tr,
-		FlushInterval: -1, // stream responses (SSE, long-poll) immediately
-		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-			if errors.Is(err, context.Canceled) {
-				return // client went away
-			}
-			rt.Log.Warn("proxy error", "app", r.App, "err", err)
-			page(w, http.StatusBadGateway, "App unreachable", "The app did not answer. It may have just crashed; phpboat restarts it automatically.", 5)
-		},
-	}
-	return &appProxy{route: r, proxy: p, stats: &Stats{}}
 }
 
 // ClientIP is the visitor's IP: CF-Connecting-IP (only Cloudflare can
@@ -189,9 +152,32 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case NotRunning:
 		page(sw, http.StatusServiceUnavailable, "App not running", "The app is stopped or has crashed.", 30)
 	default:
-		p.proxy.ServeHTTP(sw, r)
+		var h http.Handler
+		if rt.Handler != nil {
+			h = rt.Handler(p.route.App)
+		}
+		if h == nil {
+			page(sw, http.StatusServiceUnavailable, "Starting", "The app is starting. Please retry in a moment.", 3)
+		} else {
+			h.ServeHTTP(sw, r)
+		}
 	}
 	p.stats.observe(sw.code(), time.Since(start))
+}
+
+// ErrorPage writes phpboat's page for an error status of an app request
+// (phpserve's 404/405/413/431/502/503).
+func ErrorPage(w http.ResponseWriter, _ *http.Request, code int) {
+	switch code {
+	case http.StatusBadGateway:
+		page(w, code, "App error", "PHP did not answer this request. If it keeps happening, the app's log in the dashboard says why.", 5)
+	case http.StatusServiceUnavailable:
+		page(w, code, "App busy", "PHP is not taking requests right now. Please retry in a moment.", 3)
+	case http.StatusNotFound:
+		page(w, code, "Not found", "There is nothing at this address.", 0)
+	default:
+		page(w, code, http.StatusText(code), "The request could not be handled.", 0)
+	}
 }
 
 // page writes a small self-contained HTML error page.
@@ -210,8 +196,8 @@ func page(w http.ResponseWriter, code int, title, msg string, retryAfter int) {
 		code, html.EscapeString(title), html.EscapeString(msg))
 }
 
-// statusWriter records the status code. Unwrap lets the reverse proxy
-// reach Hijack/Flush on the underlying writer (WebSockets, streaming).
+// statusWriter records the status code. Unwrap lets http.ResponseController
+// reach Flush on the underlying writer (streamed PHP output).
 type statusWriter struct {
 	http.ResponseWriter
 	status int

@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026); phases 0–2 done ([phase 1 results](phase1-results.md)); next: phase 3.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phases 0–3 done ([phase 1 results](phase1-results.md)); next: phase 4.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -133,7 +133,7 @@ timeout  = "5m"                    # default: the gap to the next run, at most 1
 - **`before_start`** is where migrations go: plain PHP has no startup moment of its own. Scripts run with the app's env, after the pre-deploy backup and before the pool starts, on every start (deploy, restart, rollback), so they must be idempotent.
 - **Env vars** come from the dashboard only; there is no `.env` file. Read them with `getenv()`. Contract vars: `DATA_DIR`, `TMPDIR`, `PHPBOAT_APP`, `PHPBOAT_DOMAIN`, `PHPBOAT_RELEASE` (build ID), `PHPBOAT_COMMIT` (full SHA), `PHPBOAT_CONTRACT`. `PORT` and `HOST` are gone (FPM listens on a socket phpboat owns).
 - **Cron:** jobs run as the app user, in the app's cgroup, with the app's env, against the current build. A job never overlaps itself (a run that is due while the last one still runs is skipped and logged). Jobs don't run while the app is stopped, crashed or deploying. Output → the app log tagged `cron:<n>`. The app page shows each job's schedule, next run (in server time), last run, duration and exit code. At most 10 jobs per app.
-- **Sessions:** `session.save_path` = `apps/<app>/sessions/` (survives deploys and restarts, not backed up, cleaned by phpboat's own GC, files older than `session.gc_maxlifetime`).
+- **Sessions:** `session.save_path` = `apps/<app>/sessions/` (survives deploys and restarts, not backed up, PHP's own GC is off as on Debian; phpboat removes session files unused for 24 h, every 30 minutes).
 
 ## 7. Backups (whole `$DATA_DIR`)
 
@@ -205,7 +205,9 @@ binboat was copied in **without its git history** (not a GitHub fork), and:
 - removed: the ELF/CPU check for app binaries, `GOMEMLIMIT` for apps, binboat's site, README, architecture doc, app contract and screenshot;
 - kept and green: `go vet`, `go test -race ./...`, static amd64/arm64 builds.
 
-**Still binboat-shaped**, replaced in the phases below: deploys from GitHub releases (`github` releases/assets, `artifact` checksums/asset names, `manifest` = `binboat.toml` with `run`), apps as binaries on `$PORT` behind a reverse proxy, SQLite-only backups, release-based dashboard text and templates, the 8 migrations, `install.sh` without PHP, and the binboat logo (placeholder).
+**Since phase 3** apps run as PHP-FPM pools behind `internal/phpserve` (§4, §8), `phpboat.toml` (contract 1: `docroot`, `health_path`, `[php]`) replaced `binboat.toml`, and app memory is anon + shmem + kernel (F5).
+
+**Still binboat-shaped**, replaced in the phases below: deploys come from GitHub release tarballs (`github` releases/assets, `artifact` checksums/asset names); no Composer, `persist` or `before_start` yet (phase 4); SQLite-only backups (phase 5); release-based dashboard text; the 9 migrations, including the unused `apps.port` and binary-era `releases` columns (squashed in phase 4); `install.sh` without PHP (phase 7); the binboat logo.
 
 ## 12. Phases
 
@@ -216,7 +218,7 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 | **0. Baseline** ✅ | Copy, rename, strip binboat-only parts (§11) | builds and tests pass |
 | **1. Spike + budget** ✅ | On a real VPS (26.04, plus PHP 8.3 from a 24.04 rootfs): apt PHP, a hand-written `php-fpm -F` pool under a user + cgroup, a throwaway FastCGI client, the 5 sample apps (in `spike/samples/` for now; own repos in phase 4) | §10 measured, [results](phase1-results.md): **go** on P2–P5 |
 | **2. FastCGI + static** ✅ | `internal/fastcgi` (client, params, streaming, fuzz tests, `fcgitest` fake); `internal/phpserve` (routing rules §4, static files, P14, docroot `.` denylist) | unit tests (~89 % coverage) + real php-fpm 8.5/8.3 integration tests (CI installs php-fpm); `spike/check.sh` 31/31 on both through the new packages; vs nginx: SQLite pages equal, light pages +0.2–0.4 ms p50 and −10–30 % req/s on a shared 1 vCPU (phase 1 spike: −45 %) |
-| **3. PHP runtime** | `internal/php` (pool + ini rendering, version detection, package-version watch); supervisor spawns FPM; health over FastCGI; edge router uses phpserve instead of the reverse proxy; contract env (no `PORT`/`HOST`) | an app dir prepared by hand serves through Cloudflare on a VPS |
+| **3. PHP runtime** ✅ | `internal/php` (runtime detection, pool + ini rendering with the `[php]` allowlist, apt-update watch); supervisor runs `php-fpm -F` per app (pipes owned by the app user, SIGQUIT stop, FastCGI health check, session cleanup); the router serves apps through `phpserve`; contract env without `PORT`/`HOST`; `phpboat.toml` contract 1; PHP workers setting; F5 app memory | end to end on the VPS through Cloudflare (`pb.numa.im`, `hello.numa.im`, sample repo `im-anuvaad/phpboat-sample-hello`): deploy healthy in 205 ms (210 ms downtime), bad `phpboat.toml` and unhealthy releases refused/rolled back, rollback, env vars + restart, workers → `memory_limit`, stop/start, `kill -9` of phpboat (stale workers reaped, app back), update via `setup-host`, direct IP refused; phpboat RSS 25 MB |
 | **4. Source deploys** | `github` (branches, commits, tarball); `manifest` → `phpboat.toml` + defaults; deployer prepare stage (Composer, build cgroup), builds keyed by SHA, persist links, `before_start`; squashed migration; dashboard: Add app with branch, commits list, Rebuild; delete the release/asset code | deploy, redeploy, rollback, broken Composer, failing `before_start`, all on a VPS |
 | **5. Full-data backups** | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server |
 | **6. Cron** | `phpboat.toml` cron parsing, scheduler, no-overlap, timeouts, history, app page section | jobs run, skip while deploying, show history |

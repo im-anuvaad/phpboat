@@ -173,7 +173,7 @@ func (d *Deployer) Restart(ctx context.Context, name string) error {
 }
 
 // NeedsRestart reports whether a running app uses an older configuration
-// (env vars, limits or domain changed since it started).
+// (env vars, limits, PHP workers or domain changed since it started).
 func (d *Deployer) NeedsRestart(name string) bool {
 	cfg, ok := d.Config(name)
 	a := d.Supervisor.Get(name)
@@ -185,7 +185,8 @@ func (d *Deployer) NeedsRestart(name string) bool {
 		return false
 	}
 	sp := a.Spec()
-	return !maps.Equal(sp.Env, cfg.Base.Env) || sp.Limits != cfg.Base.Limits || sp.Domain != cfg.Base.Domain
+	return !maps.Equal(sp.Env, cfg.Base.Env) || sp.Limits != cfg.Base.Limits || sp.Domain != cfg.Base.Domain ||
+		sp.Concurrency != cfg.Base.Concurrency
 }
 
 // PurgeFiles removes an app's releases, logs and download workspaces.

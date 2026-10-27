@@ -150,7 +150,7 @@ func (s *Server) appRows(ctx context.Context) ([]AppRow, error) {
 		if sa := s.Sup.Get(a.Name); sa != nil {
 			row.Status = sa.Status()
 			if gs, err := sa.Group().Stats(); err == nil {
-				row.MemBytes = gs.MemoryCurrent
+				row.MemBytes = gs.MemoryApp
 			}
 		}
 		row.Pending = s.Dep.Pending(a.Name)
@@ -236,13 +236,13 @@ func formInput(r *http.Request) apps.Input {
 	f := func(k string) string { return r.PostFormValue(k) }
 	return apps.Input{
 		Repo: f("repo"), Domain: f("domain"),
-		Memory: f("memory"), CPU: f("cpu"), Pids: f("pids"),
+		Memory: f("memory"), CPU: f("cpu"), Pids: f("pids"), Workers: f("workers"),
 		RestoreFrom: f("restore_from"),
 	}
 }
 
 func (s *Server) newAppPage(w http.ResponseWriter, r *http.Request) {
-	in := apps.Input{Memory: "256M", CPU: "1", Pids: "256", RestoreFrom: apps.AutoFolder}
+	in := apps.Input{Memory: "256M", CPU: "1", Pids: "256", Workers: "4", RestoreFrom: apps.AutoFolder}
 	s.render(w, r, http.StatusOK, "app_new", "Add app", "apps", s.newAppData(r.Context(), in, nil))
 }
 
@@ -348,7 +348,7 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request) {
 		data["Edit"] = apps.Input{
 			Repo: full.Repo, Domain: full.Domain,
 			Memory: humanLimit(full.Limits.MemoryMax), CPU: strconv.FormatFloat(full.Limits.CPUMax, 'f', -1, 64),
-			Pids: strconv.Itoa(full.Limits.PidsMax),
+			Pids: strconv.Itoa(full.Limits.PidsMax), Workers: strconv.Itoa(full.Concurrency),
 		}
 	}
 	if row.Domain != "" {

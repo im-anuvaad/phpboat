@@ -55,7 +55,7 @@ func TestSetupAddress(t *testing.T) {
 			sawIP.Store(ClientIP(r))
 			io.WriteString(w, "dashboard")
 		})}
-	m.SetRoutes([]Route{{Host: "app.example.test", App: "app", Port: 1}})
+	m.SetRoutes([]Route{{Host: "app.example.test", App: "app"}})
 	go m.Serve(ctx)
 
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
