@@ -43,7 +43,7 @@ persist      = ["public/uploads"]    # writable folders kept across deploys (§4
 before_start = ["bin/migrate.php"]   # PHP scripts run before every start
 
 [php]
-memory_limit        = "128M"
+memory_limit        = "64M"           # default: the app's memory ÷ concurrency
 max_execution_time  = 30
 upload_max_filesize = "20M"          # post_max_size follows it
 max_input_vars      = 1000
@@ -129,7 +129,7 @@ Deploy ─► download commit ─► composer install ─► [503] stop ─► b
 | Memory (PHP workers + cron, together) | 256 MB, no swap |
 | CPU | 1 core |
 | Concurrency (simultaneous PHP requests) | 4 |
-| `memory_limit` per request | 128 MB |
+| `memory_limit` per request | memory ÷ concurrency = 64 MB. Raise it in `phpboat.toml` if one page needs more, but several such requests at once can then exceed the app's memory and get killed |
 
 ## 10. Minimal repo
 
