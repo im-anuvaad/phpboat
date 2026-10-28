@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 is on hold until the user asks for it. Ubuntu 24.04 is untested.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 is on hold until the user asks for it. Ubuntu 24.04 is untested: v1 is tested on 26.04 only, and a 24.04 test run comes after v1 (not scheduled yet).** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -23,7 +23,7 @@ Cloudflare ──HTTPS──► phpboat ──FastCGI (unix socket)──► php
 |---|---|---|
 | P1 | phpboat itself stays **one static Go binary** (CGO off), forked from binboat | it only talks FastCGI to PHP, so it never links libphp; ~70 % of binboat carries over |
 | P2 | PHP = **Ubuntu's own `php-fpm`** from apt, the version that Ubuntu release ships; no PPA, no version picker | Ubuntu's security fixes via apt; the boring standard; one version per host |
-| P3 | Supported hosts: **Ubuntu 24.04 (PHP 8.3) and 26.04 (PHP 8.5)** | 26.04 isn't widely adopted yet |
+| P3 | Supported hosts: **Ubuntu 24.04 (PHP 8.3) and 26.04 (PHP 8.5)**. v1 is tested on 26.04 only; the installer accepts 24.04, which is tested after v1 | 26.04 isn't widely adopted yet |
 | P4 | **One `php-fpm -F` master per app**, as the app's user, inside the app's cgroup; the distro's own FPM service is masked | keeps binboat's user + cgroup isolation and its one-process-tree-per-app supervisor |
 | P5 | phpboat speaks **FastCGI** over a unix socket and serves **static files itself**; no nginx/Caddy | one binary in front, as in binboat |
 | P6 | Deploy unit = a **commit on a branch**, fetched as a GitHub tarball; no git on the server | the target user doesn't tag or build releases |
@@ -223,6 +223,6 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 | **5. Full-data backups** ✅ | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server ([results](phase5-7-results.md)) |
 | **6. Cron** ✅ | `phpboat.toml` cron parsing, scheduler, no-overlap, timeouts, history, app page section | jobs run, skip while deploying, show history ([results](phase5-7-results.md)) |
 | **7. Installer** ✅ | apt packages, masked distro FPM, pinned Composer, both Ubuntu releases; PHP version on home page + API | fresh install and update on 24.04 and 26.04: 26.04 done, 24.04 untested ([results](phase5-7-results.md)) |
-| **8. Docs + v1.0.0** | README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on both releases |
+| **8. Docs + v1.0.0** | README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on 26.04 (24.04: after v1, not scheduled yet) |
 
 Phases 2 and 4 don't depend on each other and can run in parallel after phase 1; 5 and 6 need 4.
