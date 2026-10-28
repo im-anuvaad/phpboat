@@ -103,6 +103,17 @@ type Deps struct {
 	// Phase 5 plugs the full-data backup in here. A returned error aborts the
 	// deploy and restarts the old build.
 	PreDeploy func(ctx context.Context, app string, log *logs.Log) error
+	// Cron stops an app's scheduled jobs before the app is stopped for a
+	// switch (docs/plan.md §5 step 7). Set by serve.go; nil means no jobs.
+	Cron CronDrainer
+}
+
+// CronDrainer is implemented by the cron scheduler (internal/cron). The
+// deployer needs only this call, so it does not import that package.
+type CronDrainer interface {
+	// Drain stops app's jobs and reports how many were running and how many
+	// of them were killed.
+	Drain(ctx context.Context, app string) (running, killed int)
 }
 
 // Deployer runs deployments.
@@ -198,6 +209,7 @@ func (d *Deployer) specFor(cfg AppConfig, b Build) app.Spec {
 	s.HealthPath = b.Manifest.HealthPath
 	s.PHP = b.Manifest.PHP
 	s.BeforeStart = b.Manifest.BeforeStart
+	s.Cron = b.Manifest.Cron
 	return s
 }
 
@@ -216,6 +228,14 @@ func (d *Deployer) Deploying(appName string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.deploying[appName]
+}
+
+// Busy reports whether app is in the downtime window of a deploy or reserved
+// for a restore. Cron jobs don't start then.
+func (d *Deployer) Busy(appName string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.deploying[appName] || d.held[appName] != ""
 }
 
 // Deploy queues a deploy of commit sha of the app's branch.
@@ -524,6 +544,13 @@ func (d *Deployer) activate(ctx context.Context, cfg AppConfig, b Build, id int6
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activateTimeout)
 	defer cancel()
 
+	// Cron jobs stop before the app does: none starts from here on (the app
+	// is busy), running ones get 30 s, then they are killed.
+	if d.Cron != nil {
+		if running, killed := d.Cron.Drain(sctx, name); running > 0 {
+			lg.Writef("cron: %d job(s) were running; %d were still running after the grace period and were killed", running, killed)
+		}
+	}
 	if prevSpec.BuildID != "" {
 		lg.Writef("stopping build %s (state %s)", prevSpec.BuildID, prevState)
 	}

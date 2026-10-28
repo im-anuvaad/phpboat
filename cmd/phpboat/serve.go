@@ -20,6 +20,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/backup"
 	"github.com/im-anuvaad/phpboat/internal/buildinfo"
 	"github.com/im-anuvaad/phpboat/internal/cgroup"
+	"github.com/im-anuvaad/phpboat/internal/cron"
 	"github.com/im-anuvaad/phpboat/internal/deployer"
 	"github.com/im-anuvaad/phpboat/internal/edge"
 	"github.com/im-anuvaad/phpboat/internal/layout"
@@ -117,6 +118,22 @@ func serve(log *slog.Logger) error {
 		}
 		return err
 	}
+
+	// Cron: one scheduler for all apps. A deploy drains it before it stops an app.
+	cronSched := cron.New(cron.Config{
+		Store: st,
+		Log:   log.With("component", "cron"),
+		Apps: func() []cron.Process {
+			var out []cron.Process
+			for _, a := range sup.Apps() {
+				out = append(out, a)
+			}
+			return out
+		},
+		Busy: dep.Busy,
+	})
+	dep.Cron = cronSched
+	go cronSched.Run(runCtx)
 
 	appSvc := apps.New(st, box, dep, sup, edgeMgr, edgeMgr.DashboardHost, log)
 	appSvc.SetBackups(bk)

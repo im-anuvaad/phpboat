@@ -12,6 +12,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/apps"
 	"github.com/im-anuvaad/phpboat/internal/auth"
 	"github.com/im-anuvaad/phpboat/internal/backup"
+	"github.com/im-anuvaad/phpboat/internal/cron"
 	"github.com/im-anuvaad/phpboat/internal/deployer"
 	"github.com/im-anuvaad/phpboat/internal/edge"
 	"github.com/im-anuvaad/phpboat/internal/github"
@@ -391,6 +392,14 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request) {
 			data["Backups"], _ = s.Backups.List(r.Context(), name)
 			_, data["S3Set"], _ = s.Backups.S3Config(r.Context())
 			data["Policy"] = s.policyText()
+		}
+		// The jobs of the current build, with their next and recent runs.
+		if cur, ok := data["Current"].(deployer.Build); ok {
+			jobs, err := cron.Overview(r.Context(), s.Store, name, cur.Manifest.Cron, time.Now())
+			if err != nil {
+				data["CronErr"] = err.Error()
+			}
+			data["Cron"] = jobs
 		}
 		data["Edit"] = apps.Input{
 			Repo: full.Repo, Branch: full.Branch, Domain: full.Domain,

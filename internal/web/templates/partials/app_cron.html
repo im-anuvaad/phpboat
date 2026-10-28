@@ -1,2 +1,44 @@
-{{/* The cron card of the app page (phase 6). Empty until then. */}}
-{{define "app_cron"}}{{end}}
+{{/* The cron card of the app page. Data: .Data.Cron (cron.JobView list), .Data.CronErr, .Data.Current. */}}
+{{define "cron_status"}}{{if eq . "ok"}}<span class="badge s-succeeded">ok</span>{{else if or (eq . "failed") (eq . "timeout")}}<span class="badge s-failed">{{.}}</span>{{else}}{{template "state" .}}{{end}}{{end}}
+
+{{define "app_cron"}}
+{{with .Data.App}}
+<section class="card" id="cron">
+  <h2>Cron</h2>
+  <p class="muted">PHP scripts that run on a schedule, in UTC, as the app's user with its env vars and PHP settings. A job never overlaps itself. Runs are skipped while the app is stopped, being deployed or being restored. Output goes to the <a href="/apps/{{.Name}}/logs">logs</a>, tagged <code>cron:&lt;n&gt;</code>.</p>
+  {{with $.Data.CronErr}}<p class="error">Could not read the cron history: {{.}}</p>{{end}}
+  {{with $.Data.Cron}}
+  <table class="stack">
+    <thead><tr><th>#</th><th>Schedule (UTC)</th><th>Script</th><th>Timeout</th><th>Next run</th><th>Last run</th></tr></thead>
+    <tbody>{{range .}}
+    <tr>
+      <td data-label="#">{{.Job}}</td>
+      <td data-label="Schedule" class="nowrap"><code>{{.Schedule}}</code></td>
+      <td data-label="Script"><code>{{.Run}}</code></td>
+      <td data-label="Timeout" class="nowrap">{{with .Timeout}}{{.}}{{else}}<span class="muted">to the next run, max 1h</span>{{end}}</td>
+      <td data-label="Next run" class="nowrap">{{datetime .Next}}</td>
+      <td data-label="Last run">{{with .Last}}{{template "cron_status" .Status}} <small class="muted">{{ago .StartedAt}}{{if ge .ExitCode 0}}, exit {{.ExitCode}}{{end}}, {{dur .StartedAt .FinishedAt}}</small>{{with .Note}}<br><small class="muted">{{.}}</small>{{end}}{{else}}<span class="muted">never</span>{{end}}</td>
+    </tr>{{end}}
+    </tbody>
+  </table>
+  {{range .}}{{if .Recent}}
+  <h3>Job {{.Job}}: <code>{{.Run}}</code>, last {{len .Recent}} runs</h3>
+  <table class="stack">
+    <thead><tr><th>Started</th><th>Status</th><th>Exit code</th><th>Took</th><th>Note</th></tr></thead>
+    <tbody>{{range .Recent}}
+    <tr>
+      <td data-label="Started" class="nowrap">{{datetime .StartedAt}} <small class="muted">{{ago .StartedAt}}</small></td>
+      <td data-label="Status">{{template "cron_status" .Status}}</td>
+      <td data-label="Exit code">{{if ge .ExitCode 0}}{{.ExitCode}}{{else}}<span class="muted">-</span>{{end}}</td>
+      <td data-label="Took" class="nowrap">{{dur .StartedAt .FinishedAt}}</td>
+      <td data-label="Note" class="clip">{{.Note}}</td>
+    </tr>{{end}}
+    </tbody>
+  </table>
+  {{end}}{{end}}
+  {{else}}
+  <p class="muted">{{if $.Data.Current}}No cron jobs. Add <code>[[cron]]</code> tables to phpboat.toml and deploy.{{else}}Nothing is deployed yet, so no jobs are scheduled.{{end}}</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}
