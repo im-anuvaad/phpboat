@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -373,6 +374,9 @@ func (s *Server) apiApp(w http.ResponseWriter, r *http.Request) {
 	if s.Backups != nil {
 		if b, ok := s.Backups.Latest(ctx, name); ok {
 			d.Backup = backupOf(b)
+		}
+		if row.PHPInData > 0 {
+			d.Warnings = append(d.Warnings, fmt.Sprintf("%d PHP file(s) found in the data folder at the last backup", row.PHPInData))
 		}
 	}
 	if s.Edge != nil && row.Domain != "" {

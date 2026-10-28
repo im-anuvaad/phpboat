@@ -7,6 +7,7 @@
     <form method="post" action="/apps/{{.Name}}/backup" class="inline">{{template "csrf" $csrf}}<button>Back up now</button></form>
   </div>
   {{with .BackupProblem}}<p class="error">{{.}}</p>{{end}}
+  {{with .PHPInDataText}}<p class="warn">{{.}}</p>{{end}}
   <p class="muted">The whole data folder (DATA_DIR: SQLite databases, uploads and other files, up to 2 GB) is backed up {{$.Data.Policy}}, to the bucket folder <code>{{.Name}}/</code>. The newest 2 are also kept on this server.{{if not $.Data.S3Set}} <b>No bucket is configured</b>, so they are only on this server.{{end}}
   SQLite databases are copied as consistent snapshots. Other files are copied as they are at that moment, so each file is consistent only by itself. Links are kept as links; sockets and other special files are not backed up. Restore replaces the whole data folder.</p>
   {{with $.Data.Backups}}

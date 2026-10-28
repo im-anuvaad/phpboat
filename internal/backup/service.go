@@ -80,6 +80,8 @@ type Backup struct {
 	Dirs         int       `json:"dirs"`
 	Links        int       `json:"links"`
 	ContentBytes int64     `json:"content_bytes"` // uncompressed content
+	PHPFiles     int       `json:"php_files"`     // PHP-looking files found in DATA_DIR
+	PHPPaths     []string  `json:"php_paths"`     // the first MaxPHPPaths of them
 	BuildID      string    `json:"build_id"`      // the build that was running when the backup was taken
 	Error        string    `json:"error"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -253,13 +255,17 @@ func Folder(app string) string { return app + "/" }
 // ---------------------------------------------------------------- rows
 
 const cols = `id, app, kind, status, object_key, local_path, size, sha256, databases, plain_files, dirs, links,
-	content_bytes, build_id, error, created_at, finished_at`
+	content_bytes, php_files, php_paths, build_id, error, created_at, finished_at`
 
 func scan(r interface{ Scan(...any) error }) (Backup, error) {
 	var b Backup
 	var c, f int64
+	var paths string
 	err := r.Scan(&b.ID, &b.App, &b.Kind, &b.Status, &b.ObjectKey, &b.LocalPath, &b.Size, &b.SHA256,
-		&b.Databases, &b.PlainFiles, &b.Dirs, &b.Links, &b.ContentBytes, &b.BuildID, &b.Error, &c, &f)
+		&b.Databases, &b.PlainFiles, &b.Dirs, &b.Links, &b.ContentBytes, &b.PHPFiles, &paths, &b.BuildID, &b.Error, &c, &f)
+	if paths != "" {
+		b.PHPPaths = strings.Split(paths, "\n")
+	}
 	b.CreatedAt = time.Unix(c, 0)
 	if f != 0 {
 		b.FinishedAt = time.Unix(f, 0)
@@ -462,9 +468,15 @@ func (s *Service) run(ctx context.Context, app, kind string, wait bool, lg *logs
 	if err != nil {
 		return fail(err)
 	}
+	phpN, phpPaths := phpFiles(m)
+	if phpN > 0 {
+		s.Log.Warn("backup: PHP files in DATA_DIR", "app", app, "count", phpN, "paths", phpPaths)
+		note(lg, "%d PHP file(s) found in DATA_DIR (%s): phpboat never runs them, but app code that includes them would", phpN, strings.Join(phpPaths, ", "))
+	}
 	s.exec(`UPDATE backups SET status = ?, local_path = ?, size = ?, sha256 = ?, databases = ?, plain_files = ?,
-		dirs = ?, links = ?, content_bytes = ?, finished_at = ? WHERE id = ?`,
-		StatusOK, local, size, sum, inv.Databases, inv.Files, inv.Dirs, inv.Links, inv.Bytes, time.Now().Unix(), id)
+		dirs = ?, links = ?, content_bytes = ?, php_files = ?, php_paths = ?, finished_at = ? WHERE id = ?`,
+		StatusOK, local, size, sum, inv.Databases, inv.Files, inv.Dirs, inv.Links, inv.Bytes,
+		phpN, strings.Join(phpPaths, "\n"), time.Now().Unix(), id)
 
 	extra := ""
 	if t.skipped > 0 {

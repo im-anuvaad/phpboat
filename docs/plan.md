@@ -34,7 +34,7 @@ Cloudflare ──HTTPS──► phpboat ──FastCGI (unix socket)──► php
 | P11 | **Cron is built in** (per-app jobs in `phpboat.toml`, run by phpboat's own scheduler) | PHP has no long-running process to schedule work |
 | P12 | **No queue workers, daemons or any long-running app process** besides FPM | strict: keeps the supervisor and the memory budget simple |
 | P13 | **Plain PHP routing**: existing `.php` files run, other files are static, a front controller is the fallback (`try_files $uri $uri/ /index.php`) | how hand-written PHP sites are structured |
-| P14 | PHP never executes a file outside the deployed build (never from `$DATA_DIR`, never from an uploads folder) | an uploaded `shell.php` must never run |
+| P14 | phpboat never runs a file from outside the deployed build: never from `$DATA_DIR`, `$TMPDIR` or sessions, as a web request, a cron `run` or a `before_start` script. What app code `include`s is the app's responsibility (app contract §4). Each backup counts PHP-looking files in `$DATA_DIR` and the app page warns | an uploaded `shell.php` must never run. `open_basedir` must include `$DATA_DIR` for SQLite and uploads, and PHP can't allow reading a file while forbidding `include`, so the app's own includes can't be blocked (decided Oct 2026) |
 | P15 | **The memory budget is a release requirement**: measured on a real 1 GB VPS with 5 plain-PHP apps before v1 | "1 GB is enough" has to stay true |
 | P16 | `phpboat.toml` is optional; a repo with `public/index.php` deploys with no config | the target user shouldn't need to read a spec |
 
@@ -145,6 +145,7 @@ Schedule, retention, bucket layout, upload retries and badges stay as in binboat
 4. **Size cap**: 2 GB of uncompressed content per app (fixed). Above it the backup fails with "data folder too large to back up (x GB)" and the badge shows it. A pre-deploy backup above the cap does not block the deploy: it logs a warning and the deploy goes ahead (decided by the user after the phase 5 VPS test). **Q-later:** content-addressed dedup in the bucket (`<app>/blobs/<sha256>`, archives hold only the manifest) if real users hit the cap or the bucket cost; not in v1.
 5. **Restore** replaces the **whole** `$DATA_DIR`: verify everything in staging first (binboat D23), stop the app, move the current content to `$DATA_DIR/.pre-restore-<time>/` (last 2 kept, not backed up), move the restored files in, chown, start. Disk space is checked before stopping (needs the restored size + the current size).
 6. Local copies: newest 2 per app (binboat D22), counted in the disk warning.
+7. **PHP files in data**: each backup counts the files and links in `$DATA_DIR` whose names look like PHP (`.php`, `.phtml`, `.phar`, `.inc`, `.php3`–`.php8`, `.phps`; the same list phpserve refuses to send as source) and keeps the first 5 paths. The deploy log, the app page, the home page and the status API warn about them (P14). Nothing is blocked or removed.
 
 ## 8. Processes and limits
 

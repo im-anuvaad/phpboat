@@ -42,4 +42,6 @@ On disk, the build directories are root-owned and read-only. The app user gets "
 
 ## Open issue from phase 3
 
-`open_basedir` includes DATA_DIR, which PHP's own `include` needs for SQLite. A `.php` file in DATA_DIR can therefore still be included by application code. HTTP access is blocked. The plan says PHP never executes files from DATA_DIR, so this needs a decision.
+`open_basedir` includes DATA_DIR, because SQLite and the app's own file writes (uploads) need it. A `.php` file in DATA_DIR can therefore still be included by application code. HTTP access is blocked.
+
+**Decided (Oct 2026):** keep `open_basedir` as it is. P14 now says that phpboat never runs a file from DATA_DIR, TMPDIR or sessions (web request, cron, `before_start`), and that the app's own includes are its responsibility ([app contract §4](app-contract.md#4-files-and-folders)). Each backup counts the PHP-looking files in DATA_DIR, and the app page, the home page and the status API warn about them.
