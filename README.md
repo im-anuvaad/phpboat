@@ -24,7 +24,7 @@ The installer:
 - installs Composer 2.10.3, checked against its published SHA-256;
 - installs phpboat, sets up the server, and prints the address to open and a one-time password for the first sign-in.
 
-Supported: **Ubuntu 26.04 (PHP 8.5)**, the only release tested on a real server so far, and **Ubuntu 24.04 (PHP 8.3)**, which the installer accepts but which is untested. Other releases are refused. The `-security` apt pocket must be enabled (it is by default).
+Supported: **Ubuntu 26.04 (PHP 8.5)**, the only release tested on a real server so far, and **Ubuntu 24.04 (PHP 8.3)**, which the installer accepts but which is untested. Testing on 24.04 is planned for after v1. Other releases are refused. The `-security` apt pocket must be enabled (it is by default).
 
 A server stays on the Ubuntu release it was installed on. An in-place upgrade is not supported, because PHP would change under the apps. The installer refuses a server that was set up on another release, so set up a new server instead.
 
