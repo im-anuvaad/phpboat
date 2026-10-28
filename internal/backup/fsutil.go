@@ -199,9 +199,10 @@ func pruneStray(dir string, m *Manifest) error {
 	})
 }
 
-// tooLarge is the backup error for a data folder above MaxContentBytes.
+// tooLarge is the backup error for a data folder above MaxContentBytes. It
+// wraps ErrTooLarge.
 func tooLarge(n int64) error {
-	return fmt.Errorf("data folder too large to back up (%s)", gigabytes(n))
+	return fmt.Errorf("%w (%s)", ErrTooLarge, gigabytes(n))
 }
 
 // gigabytes rounds n to a tenth of a gigabyte. A value above the limit never
