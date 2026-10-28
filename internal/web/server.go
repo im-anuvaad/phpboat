@@ -31,7 +31,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/supervisor"
 )
 
-//go:embed templates/*.html
+//go:embed templates/*.html templates/partials/*.html
 var templateFS embed.FS
 
 //go:embed static
@@ -338,7 +338,7 @@ func (s *Server) parseTemplates() error {
 		if name == "layout" {
 			continue
 		}
-		t, err := template.New("").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", e)
+		t, err := template.New("").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", e, "templates/partials/*.html")
 		if err != nil {
 			return fmt.Errorf("web: template %s: %w", name, err)
 		}
