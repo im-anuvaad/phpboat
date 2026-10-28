@@ -7,18 +7,20 @@
     <form method="post" action="/apps/{{.Name}}/backup" class="inline">{{template "csrf" $csrf}}<button>Back up now</button></form>
   </div>
   {{with .BackupProblem}}<p class="error">{{.}}</p>{{end}}
-  <p class="muted">SQLite files in DATA_DIR are backed up {{$.Data.Policy}} (the newest is always kept), to the bucket folder <code>{{.Name}}/</code>. The last 2 are also kept on this server.{{if not $.Data.S3Set}} <b>No bucket is configured</b>, so they are only on this server.{{end}}</p>
+  <p class="muted">The whole data folder (DATA_DIR: SQLite databases, uploads and other files, up to 2 GB) is backed up {{$.Data.Policy}}, to the bucket folder <code>{{.Name}}/</code>. The newest 2 are also kept on this server.{{if not $.Data.S3Set}} <b>No bucket is configured</b>, so they are only on this server.{{end}}
+  SQLite databases are copied as consistent snapshots. Other files are copied as they are at that moment, so each file is consistent only by itself. Links are kept as links; sockets and other special files are not backed up. Restore replaces the whole data folder.</p>
   {{with $.Data.Backups}}
   <table class="stack">
-    <thead><tr><th>#</th><th>Taken</th><th>Kind</th><th>Status</th><th>Size</th><th>Where</th><th>Build</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Taken</th><th>Kind</th><th>Status</th><th>Content</th><th>Archive</th><th>Where</th><th>Build</th><th></th></tr></thead>
     <tbody>{{range .}}
     <tr>
       <td data-label="#">#{{.ID}}</td><td class="nowrap" data-label="Taken">{{datetime .CreatedAt}} <small class="muted">{{ago .CreatedAt}}</small></td><td data-label="Kind">{{.Kind}}</td>
       <td data-label="Status">{{if eq .Status "ok"}}<span class="badge s-running">ok</span>{{else}}{{template "state" .Status}}{{end}}{{with .Error}} <small class="error-text">{{.}}</small>{{end}}</td>
-      <td data-label="Size">{{bytes .Size}}</td>
+      <td data-label="Content">{{if .ContentBytes}}{{bytes .ContentBytes}}<br><small class="muted">{{.Inventory.String}}</small>{{else}}<span class="muted">-</span>{{end}}</td>
+      <td data-label="Archive">{{if .Size}}{{bytes .Size}}{{else}}<span class="muted">-</span>{{end}}</td>
       <td data-label="Where">{{if .Uploaded}}bucket{{end}}{{if and .Uploaded .LocalPath}} + {{end}}{{if .LocalPath}}server{{end}}</td>
       <td data-label="Build">{{if .BuildID}}<code>{{.BuildID}}</code>{{else}}<span class="muted">-</span>{{end}}</td>
-      <td class="end">{{if .Restorable}}<form method="post" action="/apps/{{$.Data.App.Name}}/restore" class="inline" data-confirm="Restore backup #{{.ID}} from {{datetime .CreatedAt}}? The app is stopped briefly; its current databases are moved to a .pre-restore folder.">{{template "csrf" $csrf}}<input type="hidden" name="id" value="{{.ID}}"><button>Restore</button></form>{{end}}</td>
+      <td class="end">{{if .Restorable}}<form method="post" action="/apps/{{$.Data.App.Name}}/restore" class="inline" data-confirm="Restore backup #{{.ID}} from {{datetime .CreatedAt}}? The app stops while its data is replaced. The current data moves to a .pre-restore folder (the newest 2 are kept).">{{template "csrf" $csrf}}<input type="hidden" name="id" value="{{.ID}}"><button>Restore</button></form>{{end}}</td>
     </tr>{{end}}
     </tbody>
   </table>

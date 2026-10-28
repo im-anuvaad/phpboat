@@ -18,13 +18,28 @@ import (
 )
 
 func TestArchiveRoundTrip(t *testing.T) {
-	src := t.TempDir()
-	os.MkdirAll(filepath.Join(src, "sub"), 0o700)
-	os.WriteFile(filepath.Join(src, "app.db"), []byte("one"), 0o600)
-	os.WriteFile(filepath.Join(src, "sub", "b.db"), []byte("two"), 0o600)
-	m := &Manifest{Version: ManifestVersion, App: "web", Files: []ManifestFile{{Path: "app.db"}, {Path: "sub/b.db"}}}
+	stage := t.TempDir()
+	os.MkdirAll(filepath.Join(stage, "sub"), 0o700)
+	os.WriteFile(filepath.Join(stage, "app.db"), []byte("one"), 0o600)
+	os.WriteFile(filepath.Join(stage, "sub", "b.db"), []byte("two"), 0o600)
+	now := time.Now().UTC().Truncate(time.Second)
+	m := &Manifest{Version: ManifestVersion, App: "web", CreatedAt: now, Entries: []Entry{
+		{Path: "sub", Kind: KindDir, Mode: "0755", MTime: now},
+		{Path: "sub/b.db", Kind: KindFile, Mode: "0600", MTime: now},
+		{Path: "app.db", Kind: KindSQLite, Mode: "0600", MTime: now},
+		{Path: "link", Kind: KindSymlink, Target: "sub/b.db", MTime: now},
+	}}
+	for i, e := range m.Entries {
+		if e.Kind == KindFile || e.Kind == KindSQLite {
+			sum, n, err := fileSHA256(filepath.Join(stage, e.Path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Entries[i].SHA256, m.Entries[i].Size = sum, n
+		}
+	}
 	out := filepath.Join(t.TempDir(), "a.tar.zst")
-	sum, size, err := writeArchive(out, m, src)
+	sum, size, err := writeArchive(out, m, stage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,22 +47,25 @@ func TestArchiveRoundTrip(t *testing.T) {
 		t.Fatal("reported checksum/size do not match the file")
 	}
 	dst := t.TempDir()
-	got, err := extractArchive(out, dst)
+	got, _, err := extractArchive(out, dst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.App != "web" || len(got.Files) != 2 {
+	if got.App != "web" || len(got.Entries) != 4 {
 		t.Fatalf("%+v", got)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dst, "sub", "b.db")); string(b) != "two" {
 		t.Fatalf("content %q", b)
+	}
+	if l, _ := os.Readlink(filepath.Join(dst, "link")); l != "sub/b.db" {
+		t.Fatalf("link target %q", l)
 	}
 }
 
 // rawArchive builds a tar.zst with a manifest and entries (name -> body);
 // the manifest lists paths with the right hashes unless lie is set.
 func rawArchive(t testing.TB, paths []string, entries map[string]string, lie bool) string {
-	var files []ManifestFile
+	var list []Entry
 	for _, p := range paths {
 		body := entries["data/"+p]
 		h := sha256.Sum256([]byte(body))
@@ -55,9 +73,9 @@ func rawArchive(t testing.TB, paths []string, entries map[string]string, lie boo
 		if lie {
 			sum = strings.Repeat("0", 64)
 		}
-		files = append(files, ManifestFile{Path: p, Size: int64(len(body)), SHA256: sum})
+		list = append(list, Entry{Path: p, Kind: KindFile, Size: int64(len(body)), SHA256: sum, Mode: "0600", MTime: time.Now()})
 	}
-	mj, _ := json.Marshal(Manifest{Version: ManifestVersion, App: "web", CreatedAt: time.Now(), Files: files})
+	mj, _ := json.Marshal(Manifest{Version: ManifestVersion, App: "web", CreatedAt: time.Now(), Entries: list})
 	var buf bytes.Buffer
 	zw, _ := zstd.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
@@ -90,7 +108,7 @@ func TestExtractRejects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dst := filepath.Join(t.TempDir(), "out")
 			os.Mkdir(dst, 0o700)
-			if _, err := extractArchive(rawArchive(t, a.paths, a.entries, a.lie), dst); err == nil {
+			if _, _, err := extractArchive(rawArchive(t, a.paths, a.entries, a.lie), dst); err == nil {
 				t.Fatal("accepted")
 			}
 			if _, err := os.Stat(filepath.Join(filepath.Dir(dst), "evil")); err == nil {

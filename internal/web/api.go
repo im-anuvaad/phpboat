@@ -231,15 +231,16 @@ type apiDeployment struct {
 }
 
 type apiBackup struct {
-	ID        int64   `json:"id"`
-	Kind      string  `json:"kind"`
-	Status    string  `json:"status"`
-	CreatedAt apiTime `json:"created_at"`
-	SizeBytes int64   `json:"size_bytes"`
-	InBucket  bool    `json:"in_bucket"`
-	OnServer  bool    `json:"on_server"`
-	Build     string  `json:"build"`
-	Error     string  `json:"error"`
+	ID           int64   `json:"id"`
+	Kind         string  `json:"kind"`
+	Status       string  `json:"status"`
+	CreatedAt    apiTime `json:"created_at"`
+	SizeBytes    int64   `json:"size_bytes"`
+	ContentBytes int64   `json:"content_bytes"`
+	InBucket     bool    `json:"in_bucket"`
+	OnServer     bool    `json:"on_server"`
+	Build        string  `json:"build"`
+	Error        string  `json:"error"`
 }
 
 type apiEdge struct {
@@ -409,7 +410,7 @@ func nowOf(p metrics.Point) *apiNow {
 
 func backupOf(b backup.Backup) *apiBackup {
 	return &apiBackup{ID: b.ID, Kind: b.Kind, Status: b.Status, CreatedAt: apiTime(b.CreatedAt), SizeBytes: b.Size,
-		InBucket: b.Uploaded(), OnServer: b.LocalPath != "", Build: b.BuildID, Error: b.Error}
+		ContentBytes: b.ContentBytes, InBucket: b.Uploaded(), OnServer: b.LocalPath != "", Build: b.BuildID, Error: b.Error}
 }
 
 func (s *Server) apiInternal(w http.ResponseWriter, err error) {

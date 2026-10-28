@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -37,12 +38,16 @@ const (
 	StatusFailed  = "failed"
 )
 
-// Policy (docs/architecture.md, Backups). It is fixed.
+// Policy (docs/plan.md §7). It is fixed.
 const (
 	Interval       = 3 * time.Hour
 	Retention      = 48 * time.Hour
 	KeepLocal      = 2
 	uploadAttempts = 3
+	// MaxContentBytes is the uncompressed size limit of one app's DATA_DIR.
+	MaxContentBytes = 2 << 30
+	// archiveSlack is the room kept for the archive's own overhead.
+	archiveSlack = 16 << 20
 )
 
 // Settings keys.
@@ -53,24 +58,32 @@ const (
 	uploadPending    = "upload pending"
 )
 
-// ErrNoDatabases means DATA_DIR has no SQLite files, so nothing to back up.
-var ErrNoDatabases = errors.New("no SQLite databases in DATA_DIR")
+// ErrEmpty means DATA_DIR has nothing in it yet, so there is nothing to back up.
+var ErrEmpty = errors.New("DATA_DIR is empty")
+
+// ErrTooLarge means DATA_DIR holds more than MaxContentBytes, so the backup is
+// not taken.
+var ErrTooLarge = errors.New("data folder too large to back up")
 
 // Backup is one row of the backups table.
 type Backup struct {
-	ID         int64     `json:"id"`
-	App        string    `json:"app"`
-	Kind       string    `json:"kind"`
-	Status     string    `json:"status"`
-	ObjectKey  string    `json:"object_key"`
-	LocalPath  string    `json:"local_path"`
-	Size       int64     `json:"size"`
-	SHA256     string    `json:"sha256"`
-	Files      int       `json:"files"`
-	BuildID    string    `json:"build_id"` // the build that was running when the backup was taken
-	Error      string    `json:"error"`
-	CreatedAt  time.Time `json:"created_at"`
-	FinishedAt time.Time `json:"finished_at"`
+	ID           int64     `json:"id"`
+	App          string    `json:"app"`
+	Kind         string    `json:"kind"`
+	Status       string    `json:"status"`
+	ObjectKey    string    `json:"object_key"`
+	LocalPath    string    `json:"local_path"`
+	Size         int64     `json:"size"`   // the archive, in bytes
+	SHA256       string    `json:"sha256"` // of the archive
+	Databases    int       `json:"databases"`
+	PlainFiles   int       `json:"plain_files"`
+	Dirs         int       `json:"dirs"`
+	Links        int       `json:"links"`
+	ContentBytes int64     `json:"content_bytes"` // uncompressed content
+	BuildID      string    `json:"build_id"`      // the build that was running when the backup was taken
+	Error        string    `json:"error"`
+	CreatedAt    time.Time `json:"created_at"`
+	FinishedAt   time.Time `json:"finished_at"`
 }
 
 // Uploaded reports whether the archive is in the bucket.
@@ -79,6 +92,11 @@ func (b Backup) Uploaded() bool { return b.ObjectKey != "" }
 // Restorable reports whether a copy is available.
 func (b Backup) Restorable() bool {
 	return b.Status == StatusOK && (b.ObjectKey != "" || b.LocalPath != "")
+}
+
+// Inventory is what the backup holds.
+func (b Backup) Inventory() Inventory {
+	return Inventory{Databases: b.Databases, Files: b.PlainFiles, Dirs: b.Dirs, Links: b.Links, Bytes: b.ContentBytes}
 }
 
 // Hooks are the app operations the service needs (implemented in serve).
@@ -229,17 +247,19 @@ func (s *Service) client(ctx context.Context) (*s3.Client, s3.Config, bool, erro
 }
 
 // Folder is where the backups of app live in the bucket: one folder per
-// app at the bucket root (docs/architecture.md).
+// app at the bucket root (docs/plan.md §7).
 func Folder(app string) string { return app + "/" }
 
 // ---------------------------------------------------------------- rows
 
-const cols = `id, app, kind, status, object_key, local_path, size, sha256, files, build_id, error, created_at, finished_at`
+const cols = `id, app, kind, status, object_key, local_path, size, sha256, databases, plain_files, dirs, links,
+	content_bytes, build_id, error, created_at, finished_at`
 
 func scan(r interface{ Scan(...any) error }) (Backup, error) {
 	var b Backup
 	var c, f int64
-	err := r.Scan(&b.ID, &b.App, &b.Kind, &b.Status, &b.ObjectKey, &b.LocalPath, &b.Size, &b.SHA256, &b.Files, &b.BuildID, &b.Error, &c, &f)
+	err := r.Scan(&b.ID, &b.App, &b.Kind, &b.Status, &b.ObjectKey, &b.LocalPath, &b.Size, &b.SHA256,
+		&b.Databases, &b.PlainFiles, &b.Dirs, &b.Links, &b.ContentBytes, &b.BuildID, &b.Error, &c, &f)
 	b.CreatedAt = time.Unix(c, 0)
 	if f != 0 {
 		b.FinishedAt = time.Unix(f, 0)
@@ -326,8 +346,8 @@ func (s *Service) exec(q string, args ...any) {
 
 // Run takes a backup of app now. The archive is kept locally; the upload
 // runs in the background when wait is false (pre-deploy), so the deploy
-// downtime only includes the snapshot. It returns ErrNoDatabases (and
-// records nothing) when DATA_DIR has no SQLite files.
+// downtime only includes the archiving. It returns ErrEmpty (and records
+// nothing) when DATA_DIR has nothing in it.
 func (s *Service) Run(ctx context.Context, app, kind string, wait bool, lg *logs.Log) (Backup, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -342,12 +362,12 @@ func note(lg *logs.Log, format string, a ...any) {
 
 func (s *Service) run(ctx context.Context, app, kind string, wait bool, lg *logs.Log) (Backup, error) {
 	dataDir := s.Layout.DataDir(app)
-	dbs, err := FindDatabases(dataDir)
+	t, err := scanTree(ctx, dataDir)
 	if err != nil {
 		return Backup{}, err
 	}
-	if len(dbs) == 0 {
-		return Backup{}, ErrNoDatabases
+	if len(t.items) == 0 {
+		return Backup{}, ErrEmpty
 	}
 	build := ""
 	if s.Hooks.Build != nil {
@@ -365,36 +385,97 @@ func (s *Service) run(ctx context.Context, app, kind string, wait bool, lg *logs
 		return b, err
 	}
 
+	if t.bytes > MaxContentBytes {
+		return fail(tooLarge(t.bytes))
+	}
+	// The staged copy and the archive exist side by side, so the peak is about
+	// twice the content.
+	if err := checkFree(s.stagingDir(), 2*t.bytes+archiveSlack, "back up "+app); err != nil {
+		return fail(err)
+	}
 	work, err := os.MkdirTemp(s.stagingDir(), app+"-")
 	if err != nil {
 		return fail(err)
 	}
 	defer os.RemoveAll(work)
+	stage := filepath.Join(work, "files")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		return fail(err)
+	}
+
+	// Every file is copied (or snapshotted) once into the stage, and the
+	// manifest describes those copies. So each file's checksum matches the
+	// bytes in the archive, even if the app writes to it during the backup.
 	m := &Manifest{Version: ManifestVersion, App: app, Kind: kind, CreatedAt: start.UTC(), Build: build, PhpboatVersion: buildinfo.Version}
-	for _, rel := range dbs {
-		dst := filepath.Join(work, "files", rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+	// The databases are snapshotted first, then every other file is copied.
+	// The manifest keeps the path order of the walk.
+	order := make([]int, 0, len(t.items))
+	for i, it := range t.items {
+		if it.kind == KindSQLite {
+			order = append(order, i)
+		}
+	}
+	for i, it := range t.items {
+		if it.kind != KindSQLite {
+			order = append(order, i)
+		}
+	}
+	staged := make([]*Entry, len(t.items))
+	var content int64
+	gone := 0
+	for _, i := range order {
+		if err := ctx.Err(); err != nil {
 			return fail(err)
 		}
-		if err := Snapshot(ctx, filepath.Join(dataDir, rel), dst); err != nil {
-			return fail(fmt.Errorf("%s: %w", rel, err))
+		e, err := s.stageItem(ctx, dataDir, stage, t.items[i])
+		if errors.Is(err, fs.ErrNotExist) {
+			gone++ // removed while the backup ran
+			continue
 		}
-		m.Files = append(m.Files, ManifestFile{Path: rel})
+		if err != nil {
+			return fail(fmt.Errorf("%s: %w", t.items[i].rel, err))
+		}
+		content += e.Size
+		if content > MaxContentBytes {
+			return fail(tooLarge(content))
+		}
+		staged[i] = &e
 	}
-	// The id keeps names unique even for two backups in the same second.
+	for _, e := range staged {
+		if e != nil {
+			m.Entries = append(m.Entries, *e)
+		}
+	}
+	inv := inventoryOf(m)
+	if esc := escapingLinks(dataDir, m); len(esc) > 0 {
+		s.Log.Warn("backup: links point outside DATA_DIR", "app", app, "links", esc)
+		note(lg, "%d symbolic link(s) point outside DATA_DIR (%s): they are backed up as links, but a restore does not recreate them",
+			len(esc), strings.Join(esc, ", "))
+	}
+
 	name := fmt.Sprintf("%s-%s-%d.tar.zst", start.UTC().Format("20060102T150405Z"), kind, id)
 	if err := os.MkdirAll(s.localDir(app), 0o700); err != nil {
 		return fail(err)
 	}
 	local := filepath.Join(s.localDir(app), name)
-	sum, size, err := writeArchive(local, m, filepath.Join(work, "files"))
+	sum, size, err := writeArchive(local, m, stage)
 	if err != nil {
 		return fail(err)
 	}
-	s.exec(`UPDATE backups SET status = ?, local_path = ?, size = ?, sha256 = ?, files = ?, finished_at = ? WHERE id = ?`,
-		StatusOK, local, size, sum, len(dbs), time.Now().Unix(), id)
-	note(lg, "backup #%d: %d database(s), %s, snapshot took %s", id, len(dbs), human(size), time.Since(start).Round(10*time.Millisecond))
-	s.Log.Info("backup taken", "app", app, "kind", kind, "id", id, "databases", len(dbs), "bytes", size)
+	s.exec(`UPDATE backups SET status = ?, local_path = ?, size = ?, sha256 = ?, databases = ?, plain_files = ?,
+		dirs = ?, links = ?, content_bytes = ?, finished_at = ? WHERE id = ?`,
+		StatusOK, local, size, sum, inv.Databases, inv.Files, inv.Dirs, inv.Links, inv.Bytes, time.Now().Unix(), id)
+
+	extra := ""
+	if t.skipped > 0 {
+		extra += fmt.Sprintf(", %d special file(s) skipped", t.skipped)
+	}
+	if gone > 0 {
+		extra += fmt.Sprintf(", %d removed during the backup", gone)
+	}
+	note(lg, "backup #%d: %s, %s of content, archive %s, taken in %s%s", id, inv, human(inv.Bytes), human(size),
+		time.Since(start).Round(10*time.Millisecond), extra)
+	s.Log.Info("backup taken", "app", app, "kind", kind, "id", id, "entries", len(m.Entries), "bytes", inv.Bytes, "archive_bytes", size)
 	s.pruneLocal(app)
 
 	if wait {
@@ -408,8 +489,45 @@ func (s *Service) run(ctx context.Context, app, kind string, wait bool, lg *logs
 			s.upload(uctx, id, app, local, name, nil)
 		}()
 	}
-	b, err := s.Get(context.WithoutCancel(ctx), id)
-	return b, err
+	return s.Get(context.WithoutCancel(ctx), id)
+}
+
+// stageItem copies one path of DATA_DIR into stage (files and SQLite
+// snapshots) and describes it for the manifest. Folders and links are only
+// described. A file that is not there any more returns fs.ErrNotExist.
+func (s *Service) stageItem(ctx context.Context, dataDir, stage string, it item) (Entry, error) {
+	e := Entry{Path: it.rel, Kind: it.kind, MTime: it.mtime}
+	if it.kind != KindSymlink {
+		e.Mode = modeString(it.mode)
+	}
+	src := filepath.Join(dataDir, filepath.FromSlash(it.rel))
+	dst := filepath.Join(stage, filepath.FromSlash(it.rel))
+	switch it.kind {
+	case KindSymlink:
+		e.Target = it.target
+	case KindSQLite:
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return e, err
+		}
+		if err := Snapshot(ctx, src, dst); err != nil {
+			return e, err
+		}
+		sum, n, err := fileSHA256(dst)
+		if err != nil {
+			return e, err
+		}
+		e.SHA256, e.Size = sum, n
+	case KindFile:
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return e, err
+		}
+		sum, n, err := copyHashed(src, dst)
+		if err != nil {
+			return e, err
+		}
+		e.SHA256, e.Size = sum, n
+	}
+	return e, nil
 }
 
 // upload sends the archive to the bucket with retries, then applies
@@ -596,14 +714,28 @@ func (s *Service) RunAll(ctx context.Context, kind string) {
 		if ctx.Err() != nil {
 			return
 		}
-		if _, err := s.Run(ctx, app, kind, true, nil); err != nil && !errors.Is(err, ErrNoDatabases) {
+		if _, err := s.Run(ctx, app, kind, true, nil); err != nil && !errors.Is(err, ErrEmpty) {
 			s.Log.Warn("scheduled backup failed", "app", app, "err", err)
 		}
 	}
 }
 
+// checkFree fails unless the file system of path has at least need bytes free.
+func checkFree(path string, need int64, what string) error {
+	free, err := freeBytes(path)
+	if err != nil {
+		return err
+	}
+	if free < need {
+		return fmt.Errorf("not enough free disk space to %s: need %s, have %s", what, human(need), human(free))
+	}
+	return nil
+}
+
 func human(n int64) string {
 	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
 	case n >= 1<<20:
 		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
 	case n >= 1<<10:

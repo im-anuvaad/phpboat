@@ -1,87 +1,19 @@
-// Package backup takes consistent snapshots of the SQLite databases in each
-// app's DATA_DIR, archives them (tar + zstd, with a manifest of SHA-256
-// sums), keeps the newest copies locally, uploads them to S3-compatible
-// storage, applies retention and restores them (docs/architecture.md).
+// Package backup archives the whole DATA_DIR of each app: SQLite databases as
+// consistent snapshots, every other file as it is copied, links as links.
+// It keeps the newest archives locally, uploads them to S3-compatible
+// storage, applies retention and restores them (docs/plan.md §7).
 package backup
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
 	"syscall"
 
 	_ "modernc.org/sqlite"
 )
-
-var sqliteHeader = []byte("SQLite format 3\x00")
-
-// skipDir reports directories never included in backups.
-func skipDir(name string) bool { return strings.HasPrefix(name, ".pre-restore-") }
-
-// sidecar reports SQLite's companion files.
-func sidecar(name string) bool {
-	for _, s := range []string{"-wal", "-shm", "-journal"} {
-		if strings.HasSuffix(name, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// FindDatabases returns the SQLite database files under dir (relative
-// paths, sorted), detected by their header rather than their name.
-func FindDatabases(dir string) ([]string, error) {
-	var out []string
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) && p == dir {
-				return fs.SkipAll
-			}
-			return err
-		}
-		if d.IsDir() {
-			if p != dir && skipDir(d.Name()) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() || sidecar(d.Name()) {
-			return nil
-		}
-		f, err := os.Open(p)
-		if err != nil {
-			return err
-		}
-		hdr := make([]byte, len(sqliteHeader))
-		n, _ := io.ReadFull(f, hdr)
-		f.Close()
-		if n == len(hdr) && bytes.Equal(hdr, sqliteHeader) {
-			rel, _ := filepath.Rel(dir, p)
-			out = append(out, rel)
-		}
-		return nil
-	})
-	return out, err
-}
-
-func dsn(path string, extra ...string) string {
-	q := url.Values{}
-	q.Add("_pragma", "busy_timeout(10000)")
-	for _, e := range extra {
-		q.Add("_pragma", e)
-	}
-	return (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
-}
 
 // Snapshot writes a consistent copy of the live database src to dst with
 // VACUUM INTO (safe while the app writes; works in WAL mode) and checks
@@ -140,13 +72,11 @@ func QuickCheck(ctx context.Context, path string) error {
 	return nil
 }
 
-func fileSHA256(path string) (string, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
+func dsn(path string, extra ...string) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(10000)")
+	for _, e := range extra {
+		q.Add("_pragma", e)
 	}
-	defer f.Close()
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	return hex.EncodeToString(h.Sum(nil)), n, err
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
 }

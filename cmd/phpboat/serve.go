@@ -111,8 +111,14 @@ func serve(log *slog.Logger) error {
 	}
 	dep.PreDeploy = func(ctx context.Context, name string, lg *logs.Log) error {
 		_, err := bk.Run(ctx, name, backup.KindPreDeploy, false, lg)
-		if errors.Is(err, backup.ErrNoDatabases) {
-			lg.Writef("pre-deploy backup: no SQLite databases in DATA_DIR yet; nothing to back up")
+		switch {
+		case errors.Is(err, backup.ErrEmpty):
+			lg.Writef("pre-deploy backup: DATA_DIR is empty; nothing to back up")
+			return nil
+		case errors.Is(err, backup.ErrTooLarge):
+			// Warn and deploy anyway: a data folder over the limit must not
+			// block releases. The failed backup stays in the backups list.
+			lg.Writef("warning: %v; the pre-deploy backup was skipped and the deploy continues", err)
 			return nil
 		}
 		return err

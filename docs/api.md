@@ -135,7 +135,7 @@ Everything above, plus:
   },
   "last_backup": {
     "id": 88, "kind": "scheduled", "status": "ok", "created_at": "2026-10-12T15:00:04Z",
-    "size_bytes": 482133, "in_bucket": true, "on_server": true, "build": "3f9c2a71b0de", "error": ""
+    "size_bytes": 482133, "content_bytes": 1310720, "in_bucket": true, "on_server": true, "build": "3f9c2a71b0de", "error": ""
   },
   "domain_status": { "dns": "ok", "certificate_valid_until": "2041-10-01T00:00:00Z", "error": "" },
   "warnings": ["crashed and not being restarted: exit status 1"]
@@ -144,6 +144,7 @@ Everything above, plus:
 
 - `now` is the newest 10-second sample, `null` until the first one; percentiles are `null` without traffic.
 - `last_deployment`, `last_backup` and `domain_status` are `null` when there is none.
+- In `last_backup`, `size_bytes` is the archive (compressed) and `content_bytes` the uncompressed size of the data folder.
 - `warnings` explains, in plain words, why the app is unhealthy or needs attention.
 
 ## Conventions
