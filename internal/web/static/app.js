@@ -44,6 +44,41 @@ function refresh(el) {
   }, every);
 }
 
+// <select data-branch-source="#repo" data-branch-note="id"> lists the branches
+// of the repository typed into the input, from /github/branches. On the Add
+// app form the empty option means the repository's default branch; the
+// settings form (data-no-default) always has a branch.
+function branchPicker(sel) {
+  const input = document.querySelector(sel.dataset.branchSource);
+  if (!input) return;
+  const note = document.getElementById(sel.dataset.branchNote || "");
+  const say = (text) => { if (note) note.textContent = text; };
+  const load = async () => {
+    const repo = input.value.trim();
+    if (!repo) return;
+    try {
+      const r = await fetch("/github/branches?repo=" + encodeURIComponent(repo), {
+        credentials: "same-origin", headers: { "Accept": "application/json" },
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "the lookup failed");
+      const keep = sel.value;
+      sel.innerHTML = "";
+      if (!sel.hasAttribute("data-no-default")) {
+        sel.add(new Option("default branch (" + j.default + ")", ""));
+      }
+      for (const b of j.branches) sel.add(new Option(b, b));
+      if (keep && !j.branches.includes(keep)) sel.add(new Option(keep, keep));
+      sel.value = keep;
+      say(j.branches.length + " branches. Default: " + j.default + ".");
+    } catch (e) {
+      say("Could not list the branches: " + e.message);
+    }
+  };
+  input.addEventListener("change", load);
+  if (input.value.trim()) load();
+}
+
 function wire(root) {
   root.querySelectorAll("form[data-confirm]").forEach((f) => {
     f.addEventListener("submit", (e) => { if (!confirm(f.dataset.confirm)) e.preventDefault(); });
@@ -56,5 +91,6 @@ function wire(root) {
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("pre[data-stream]").forEach(stream);
   document.querySelectorAll("[data-refresh][id]").forEach(refresh);
+  document.querySelectorAll("select[data-branch-source]").forEach(branchPicker);
   wire(document);
 });

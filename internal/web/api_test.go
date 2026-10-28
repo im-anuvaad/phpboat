@@ -43,8 +43,8 @@ func apiServer(t *testing.T) (*Server, http.Handler, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Writer().Exec(`INSERT INTO apps (name, repo, domain, port, memory_max, cpu_max, pids_max, created_at, type, branch, build_memory, build_timeout)
-		VALUES ('web', 'https://github.com/me/web', 'web.example.com', 20001, 268435456, 1, 256, 0, 'release', '', 0, 0)`); err != nil {
+	if _, err := st.Writer().Exec(`INSERT INTO apps (name, repo, branch, domain, memory_max, cpu_max, pids_max, created_at, concurrency)
+		VALUES ('web', 'https://github.com/me/web', 'main', 'web.example.com', 268435456, 1, 256, 0, 4)`); err != nil {
 		t.Fatal(err)
 	}
 	a := auth.New(st)

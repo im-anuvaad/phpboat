@@ -149,17 +149,3 @@ func FuzzUnpack(f *testing.F) {
 		unpack(t, es)
 	})
 }
-
-func TestChecksum(t *testing.T) {
-	sums := []byte("0f833f23eb1e8d899fe057240446b8ddb946fd3a375059bebec9864b868e6dcd  app-linux-arm64.tar.gz\n" +
-		"A8F5B15B413FA1645E527A8989C5586A7A88E529C10B2A1C295C3BFC43355750 *app-linux-amd64.tar.gz\n")
-	if s, err := Checksum(sums, "app-linux-amd64.tar.gz"); err != nil || s != "a8f5b15b413fa1645e527a8989c5586a7a88e529c10b2a1c295c3bfc43355750" {
-		t.Fatalf("%q %v", s, err)
-	}
-	if _, err := Checksum(sums, "app-linux-riscv.tar.gz"); err == nil {
-		t.Fatal("missing line accepted")
-	}
-	if _, err := Checksum([]byte("zz  app-linux-amd64.tar.gz"), "app-linux-amd64.tar.gz"); err == nil {
-		t.Fatal("bad hash accepted")
-	}
-}

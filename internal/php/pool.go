@@ -131,7 +131,7 @@ func MemoryLimitBytes(v string) int64 { return sizeBytes(v) }
 // Pool is one app's FPM configuration.
 type Pool struct {
 	App         string
-	Build       string // the deployed release directory (open_basedir)
+	Build       string // the deployed build directory (open_basedir)
 	DataDir     string
 	TmpDir      string
 	SessionsDir string

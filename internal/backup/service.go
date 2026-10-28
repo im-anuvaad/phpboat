@@ -67,7 +67,7 @@ type Backup struct {
 	Size       int64     `json:"size"`
 	SHA256     string    `json:"sha256"`
 	Files      int       `json:"files"`
-	ReleaseID  string    `json:"release_id"`
+	BuildID    string    `json:"build_id"` // the build that was running when the backup was taken
 	Error      string    `json:"error"`
 	CreatedAt  time.Time `json:"created_at"`
 	FinishedAt time.Time `json:"finished_at"`
@@ -85,11 +85,11 @@ func (b Backup) Restorable() bool {
 type Hooks struct {
 	// Apps lists the apps to back up on schedule.
 	Apps func() []string
-	// Release returns the app's current release id ("" if none).
-	Release func(app string) string
+	// Build returns the app's current build ID ("" if none).
+	Build func(app string) string
 	// Reserve blocks deployments of app during a restore; it fails if a
 	// deployment is in progress.
-	Reserve func(app string) (release func(), err error)
+	Reserve func(app string) (unlock func(), err error)
 	// Stop stops the app and reports whether it was running.
 	Stop func(ctx context.Context, app string) (wasRunning bool, err error)
 	// Start starts the app again.
@@ -234,12 +234,12 @@ func Folder(app string) string { return app + "/" }
 
 // ---------------------------------------------------------------- rows
 
-const cols = `id, app, kind, status, object_key, local_path, size, sha256, files, release_id, error, created_at, finished_at`
+const cols = `id, app, kind, status, object_key, local_path, size, sha256, files, build_id, error, created_at, finished_at`
 
 func scan(r interface{ Scan(...any) error }) (Backup, error) {
 	var b Backup
 	var c, f int64
-	err := r.Scan(&b.ID, &b.App, &b.Kind, &b.Status, &b.ObjectKey, &b.LocalPath, &b.Size, &b.SHA256, &b.Files, &b.ReleaseID, &b.Error, &c, &f)
+	err := r.Scan(&b.ID, &b.App, &b.Kind, &b.Status, &b.ObjectKey, &b.LocalPath, &b.Size, &b.SHA256, &b.Files, &b.BuildID, &b.Error, &c, &f)
 	b.CreatedAt = time.Unix(c, 0)
 	if f != 0 {
 		b.FinishedAt = time.Unix(f, 0)
@@ -307,9 +307,9 @@ func (s *Service) Problem(ctx context.Context, app string) string {
 	return ""
 }
 
-func (s *Service) insert(ctx context.Context, app, kind, release string) (int64, error) {
-	res, err := s.Store.Writer().ExecContext(ctx, `INSERT INTO backups (app, kind, status, release_id, created_at) VALUES (?, ?, ?, ?, ?)`,
-		app, kind, StatusRunning, release, time.Now().Unix())
+func (s *Service) insert(ctx context.Context, app, kind, build string) (int64, error) {
+	res, err := s.Store.Writer().ExecContext(ctx, `INSERT INTO backups (app, kind, status, build_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+		app, kind, StatusRunning, build, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -349,11 +349,11 @@ func (s *Service) run(ctx context.Context, app, kind string, wait bool, lg *logs
 	if len(dbs) == 0 {
 		return Backup{}, ErrNoDatabases
 	}
-	release := ""
-	if s.Hooks.Release != nil {
-		release = s.Hooks.Release(app)
+	build := ""
+	if s.Hooks.Build != nil {
+		build = s.Hooks.Build(app)
 	}
-	id, err := s.insert(ctx, app, kind, release)
+	id, err := s.insert(ctx, app, kind, build)
 	if err != nil {
 		return Backup{}, err
 	}
@@ -370,7 +370,7 @@ func (s *Service) run(ctx context.Context, app, kind string, wait bool, lg *logs
 		return fail(err)
 	}
 	defer os.RemoveAll(work)
-	m := &Manifest{Version: ManifestVersion, App: app, Kind: kind, CreatedAt: start.UTC(), Release: release, PhpboatVersion: buildinfo.Version}
+	m := &Manifest{Version: ManifestVersion, App: app, Kind: kind, CreatedAt: start.UTC(), Build: build, PhpboatVersion: buildinfo.Version}
 	for _, rel := range dbs {
 		dst := filepath.Join(work, "files", rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {

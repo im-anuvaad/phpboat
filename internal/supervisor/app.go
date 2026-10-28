@@ -23,9 +23,13 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/logs"
 	"github.com/im-anuvaad/phpboat/internal/php"
+	"github.com/im-anuvaad/phpboat/internal/phpcli"
 	"github.com/im-anuvaad/phpboat/internal/phpserve"
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
+
+// beforeStartTimeout bounds one before_start script (docs/plan.md §5).
+const beforeStartTimeout = 5 * time.Minute
 
 // State of an app.
 type State string
@@ -72,7 +76,7 @@ var DefaultPolicy = Policy{
 type Status struct {
 	State      State
 	PID        int
-	Release    string
+	Build      string    // the build the process runs (or last ran)
 	StartedAt  time.Time // current process spawn time
 	HealthyAt  time.Time
 	Restarts   int // automatic restarts since the last manual start
@@ -86,8 +90,8 @@ type Status struct {
 // ErrStopped is returned to Start waiters when the app is stopped meanwhile.
 var ErrStopped = errors.New("app was stopped")
 
-// ErrNoRelease is returned by Start for an app that was never deployed.
-var ErrNoRelease = errors.New("app has no release yet; deploy it first")
+// ErrNotDeployed is returned by Start for an app that was never deployed.
+var ErrNotDeployed = errors.New("app has never been deployed; deploy it first")
 
 type op int
 
@@ -114,7 +118,7 @@ type healthEvent struct {
 	err error
 }
 
-// App is one supervised app: a php-fpm master for its current release,
+// App is one supervised app: a php-fpm master for its current build,
 // and the phpserve handler in front of it. All mutable process state is
 // owned by the loop goroutine; Status() reads a mutex-protected snapshot.
 type App struct {
@@ -137,6 +141,8 @@ type App struct {
 	mu     sync.RWMutex
 	spec   app.Spec
 	status Status
+
+	startMu sync.Mutex // one Start at a time, including its before_start scripts
 
 	// loop-owned
 	gen          int
@@ -161,7 +167,7 @@ func newApp(spec app.Spec, dirs layout.Layout, u users.User, g *cgroup.Group, lg
 		healthCh: make(chan healthEvent, 1),
 		quit:     make(chan struct{}),
 		spec:     spec,
-		status:   Status{State: Stopped, Release: spec.ReleaseID},
+		status:   Status{State: Stopped, Build: spec.BuildID},
 		desired:  Stopped,
 	}
 	if st, err := g.Stats(); err == nil {
@@ -199,8 +205,20 @@ func (a *App) Log() *logs.Log { return a.log }
 // Group returns the app's cgroup (for metrics).
 func (a *App) Group() *cgroup.Group { return a.group }
 
-// Start starts the app and waits until it is healthy or has failed.
-func (a *App) Start(ctx context.Context) error { return a.do(ctx, command{op: opStart}) }
+// Start starts the app and waits until it is healthy or has failed. Before
+// a stopped app starts, its before_start scripts run in order; if one fails
+// the app does not start.
+func (a *App) Start(ctx context.Context) error {
+	a.startMu.Lock()
+	defer a.startMu.Unlock()
+	// No process runs in these states, so the scripts can start in an empty cgroup.
+	if st := a.state(); st == Stopped || st == Crashed || st == Backoff {
+		if err := a.runBeforeStart(ctx, a.Spec()); err != nil {
+			return err
+		}
+	}
+	return a.do(ctx, command{op: opStart})
+}
 
 // Stop stops the app (SIGQUIT: FPM finishes running requests; after the
 // grace period the whole cgroup is killed).
@@ -214,7 +232,7 @@ func (a *App) Restart(ctx context.Context) error {
 	return a.Start(ctx)
 }
 
-// Update replaces the spec (e.g. a new release). The app must be stopped or
+// Update replaces the spec (e.g. a new build). The app must be stopped or
 // crashed. Name and user cannot change.
 func (a *App) Update(ctx context.Context, spec app.Spec) error {
 	if err := spec.Validate(); err != nil {
@@ -298,8 +316,8 @@ func (a *App) loop() {
 }
 
 func (a *App) handleStart(reply chan error) {
-	if a.Spec().ReleaseID == "" {
-		reply <- ErrNoRelease
+	if a.Spec().BuildID == "" {
+		reply <- ErrNotDeployed
 		return
 	}
 	a.desired = Running
@@ -363,7 +381,7 @@ func (a *App) handleUpdate(c command) {
 	}
 	a.mu.Lock()
 	a.spec = c.spec
-	a.status.Release = c.spec.ReleaseID
+	a.status.Build = c.spec.BuildID
 	a.mu.Unlock()
 	c.reply <- nil
 }
@@ -384,9 +402,9 @@ func (a *App) spawn() {
 	now := time.Now()
 	a.setStatus(func(s *Status) {
 		s.State, s.PID, s.StartedAt, s.HealthyAt, s.NextStart = Starting, cmd.Process.Pid, now, time.Time{}, time.Time{}
-		s.Release = spec.ReleaseID
+		s.Build = spec.BuildID
 	})
-	a.log.Writef("started php-fpm %s, pid %d (release %s, %d workers)", cmd.Path, cmd.Process.Pid, spec.ReleaseID, spec.Concurrency)
+	a.log.Writef("started php-fpm %s, pid %d (build %s, %d workers)", cmd.Path, cmd.Process.Pid, spec.BuildID, spec.Concurrency)
 
 	gen := a.gen
 	go func() {
@@ -416,8 +434,59 @@ func (a *App) spawn() {
 	}()
 }
 
+// pool is the FPM pool of spec, which is also the source of the ini
+// settings the before_start scripts run with.
+func (a *App) pool(spec app.Spec) php.Pool {
+	return php.Pool{
+		App: spec.Name, Build: spec.BuildDir, DataDir: a.dataDir(spec), TmpDir: a.tmpDir(spec),
+		SessionsDir: a.dirs.SessionsDir(spec.Name), Socket: a.dirs.Socket(spec.Name),
+		Concurrency: spec.Concurrency, MemoryMax: spec.Limits.MemoryMax, Settings: spec.PHP,
+	}
+}
+
+// runBeforeStart runs the build's before_start scripts in order, as the app
+// user, inside the app's cgroup, with the app's environment and PHP
+// settings (docs/app-contract.md §8). Their output goes to the app log.
+func (a *App) runBeforeStart(ctx context.Context, spec app.Spec) error {
+	if len(spec.BeforeStart) == 0 {
+		return nil
+	}
+	if a.web.PHP == nil {
+		return php.ErrNotInstalled
+	}
+	rt, err := a.web.PHP()
+	if err != nil {
+		return err
+	}
+	ini := a.pool(spec).INI()
+	env := a.environ(spec)
+	for _, script := range spec.BeforeStart {
+		a.log.Writef("before_start: php %s", script)
+		sctx, cancel := context.WithTimeout(ctx, beforeStartTimeout)
+		res, err := phpcli.Run(sctx, phpcli.Command{
+			Binary: rt.CLI, Ini: ini, Args: []string{script}, Dir: spec.BuildDir, Env: env,
+			User: a.user, Group: a.group, Log: a.log,
+		})
+		cancel()
+		switch {
+		case err != nil:
+			return fmt.Errorf("before_start %s: %w", script, err)
+		case res.TimedOut:
+			return fmt.Errorf("before_start %s did not finish within %s", script, beforeStartTimeout)
+		case res.ExitCode != 0:
+			msg := phpcli.LastLine(res.Tail)
+			if msg == "" {
+				msg = "no output"
+			}
+			return fmt.Errorf("before_start %s failed (exit code %d): %s", script, res.ExitCode, msg)
+		}
+		a.log.Writef("before_start: %s finished", script)
+	}
+	return nil
+}
+
 // startProcess writes the pool config and starts php-fpm in the app's
-// cgroup as the app user. It returns the handler for the release.
+// cgroup as the app user. It returns the handler for the build.
 func (a *App) startProcess(spec app.Spec) (*exec.Cmd, *phpserve.Site, error) {
 	if a.web.PHP == nil {
 		return nil, nil, php.ErrNotInstalled
@@ -428,7 +497,7 @@ func (a *App) startProcess(spec app.Spec) (*exec.Cmd, *phpserve.Site, error) {
 	}
 	sock := a.dirs.Socket(spec.Name)
 	site, err := phpserve.New(phpserve.Config{
-		Build: spec.ReleaseDir, Docroot: spec.Docroot, DataDir: a.dataDir(spec),
+		Build: spec.BuildDir, Docroot: spec.Docroot, DataDir: a.dataDir(spec),
 		FastCGI:  &fastcgi.Client{Address: sock},
 		ClientIP: a.web.ClientIP,
 		Error:    a.web.ErrorPage,
@@ -438,14 +507,9 @@ func (a *App) startProcess(spec app.Spec) (*exec.Cmd, *phpserve.Site, error) {
 		},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("release %s: %w", spec.ReleaseID, err)
+		return nil, nil, fmt.Errorf("build %s: %w", spec.BuildID, err)
 	}
-	pool := php.Pool{
-		App: spec.Name, Build: spec.ReleaseDir, DataDir: a.dataDir(spec), TmpDir: a.tmpDir(spec),
-		SessionsDir: a.dirs.SessionsDir(spec.Name), Socket: sock,
-		Concurrency: spec.Concurrency, MemoryMax: spec.Limits.MemoryMax, Settings: spec.PHP,
-	}
-	conf, err := pool.Config()
+	conf, err := a.pool(spec).Config()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -483,7 +547,7 @@ func (a *App) startProcess(spec app.Spec) (*exec.Cmd, *phpserve.Site, error) {
 	}
 
 	cmd := exec.Command(rt.FPM, "-F", "-O", "-y", a.dirs.FPMConfig(spec.Name))
-	cmd.Dir = spec.ReleaseDir
+	cmd.Dir = spec.BuildDir
 	cmd.Env = a.environ(spec)
 	cmd.Stdout, cmd.Stderr = outW, errW
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -524,9 +588,12 @@ func writeFileAtomic(path string, b []byte, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-// environ builds the contract environment (docs/app-contract.md §3). The
+// environ builds the contract environment (docs/app-contract.md §7). The
 // process does not inherit phpboat's environment.
-func (a *App) environ(spec app.Spec) []string {
+func (a *App) environ(spec app.Spec) []string { return Environ(a.dirs, spec) }
+
+// Environ is the contract environment of spec's processes.
+func Environ(l layout.Layout, spec app.Spec) []string {
 	env := map[string]string{
 		"PATH": "/usr/local/bin:/usr/bin:/bin",
 		"LANG": "C.UTF-8",
@@ -535,11 +602,12 @@ func (a *App) environ(spec app.Spec) []string {
 		env[k] = v
 	}
 	contract := map[string]string{
-		"DATA_DIR":         a.dataDir(spec),
-		"TMPDIR":           a.tmpDir(spec),
+		"DATA_DIR":         l.DataDir(spec.Name),
+		"TMPDIR":           l.TmpDir(spec.Name),
 		"PHPBOAT_APP":      spec.Name,
 		"PHPBOAT_DOMAIN":   spec.Domain,
-		"PHPBOAT_RELEASE":  spec.ReleaseID,
+		"PHPBOAT_RELEASE":  spec.BuildID,
+		"PHPBOAT_COMMIT":   spec.CommitSHA,
 		"PHPBOAT_CONTRACT": strconv.Itoa(app.ContractVersion),
 	}
 	for k, v := range contract {

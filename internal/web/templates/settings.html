@@ -68,13 +68,13 @@
   {{if .Data.GitHubSet}}
   <p>A token is set{{with .Data.GitHubLogin}} for <b>{{.}}</b>{{end}}. It is stored encrypted and only sent to github.com.</p>
   {{else}}
-  <p class="muted">No token: only releases of public repositories can be deployed.</p>
+  <p class="muted">No token: only public repositories can be deployed.</p>
   {{end}}
   <form method="post" action="/settings/github-token" class="grid">
     {{template "csrf" $csrf}}
     <label class="wide">{{if .Data.GitHubSet}}Replace token{{else}}Personal access token{{end}}
       <input type="password" name="token" autocomplete="off" placeholder="github_pat_…">
-      <small>Fine-grained token with <b>Contents: Read-only</b> on your app repositories: phpboat lists their releases and downloads the release files.</small></label>
+      <small>Fine-grained token with <b>Contents: Read-only</b> on your app repositories: phpboat lists their branches and commits and downloads their source.</small></label>
     <div class="wide buttons"><button>Save token</button>
     {{if .Data.GitHubSet}}<button name="remove" value="1" class="link" data-confirm-click="Remove the GitHub token?">remove token</button>{{end}}</div>
   </form>

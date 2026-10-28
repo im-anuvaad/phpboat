@@ -1,11 +1,10 @@
-// Package artifact checks and unpacks release tarballs (docs/architecture.md
-// §7): the SHA-256 from checksums.txt and safe extraction.
+// Package artifact unpacks the source tarball of a commit and hashes it.
+// Extraction is strict: anything that could write outside the destination
+// is refused.
 package artifact
 
 import (
 	"archive/tar"
-	"bufio"
-	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,35 +13,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
-// MaxUnpacked bounds the unpacked size of a release.
+// MaxUnpacked bounds the unpacked size of a source tree.
 const MaxUnpacked = 1 << 30
 
-// MaxEntries bounds the number of entries in a release tarball.
+// MaxEntries bounds the number of entries in a source tarball.
 const MaxEntries = 20000
-
-// AssetName is the tarball asset for a Go architecture (amd64, arm64).
-func AssetName(goarch string) string { return "app-linux-" + goarch + ".tar.gz" }
-
-// ChecksumsName is the checksums asset.
-const ChecksumsName = "checksums.txt"
-
-var sumLine = regexp.MustCompile(`^([0-9a-fA-F]{64}) [ *](.+)$`)
-
-// Checksum returns the SHA-256 listed for name in a sha256sum-style file.
-func Checksum(sums []byte, name string) (string, error) {
-	sc := bufio.NewScanner(bytes.NewReader(sums))
-	for sc.Scan() {
-		m := sumLine.FindStringSubmatch(strings.TrimSpace(sc.Text()))
-		if m != nil && (m[2] == name || m[2] == "./"+name) {
-			return strings.ToLower(m[1]), nil
-		}
-	}
-	return "", fmt.Errorf("%s has no line for %s", ChecksumsName, name)
-}
 
 // FileSHA256 hashes a file.
 func FileSHA256(path string) (string, error) {

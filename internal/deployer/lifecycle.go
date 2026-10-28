@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/im-anuvaad/phpboat/internal/cgroup"
 	"github.com/im-anuvaad/phpboat/internal/supervisor"
 )
 
@@ -24,7 +25,7 @@ func (d *Deployer) busy(name string) error {
 }
 
 // Reserve blocks deployments of an app (e.g. during a restore) until the
-// returned release function is called. It fails if a deployment is
+// returned unlock function is called. It fails if a deployment is
 // queued or running.
 func (d *Deployer) Reserve(name, reason string) (func(), error) {
 	d.mu.Lock()
@@ -52,6 +53,7 @@ func (d *Deployer) UpdateConfig(cfg AppConfig) error {
 		return fmt.Errorf("unknown app %q", cfg.Base.Name)
 	}
 	d.apps[cfg.Base.Name] = cfg
+	delete(d.commits, cfg.Base.Name) // the branch may have changed
 	return nil
 }
 
@@ -67,10 +69,10 @@ func (d *Deployer) Unregister(name string) error {
 	return nil
 }
 
-// Forget deletes an app's releases, deployments and desired state rows.
+// Forget deletes an app's builds, deployments and desired state rows.
 func (d *Deployer) Forget(ctx context.Context, name string) error {
 	for _, q := range []string{
-		`DELETE FROM releases WHERE app = ?`,
+		`DELETE FROM builds WHERE app = ?`,
 		`DELETE FROM deployments WHERE app = ?`,
 		`DELETE FROM app_state WHERE app = ?`,
 	} {
@@ -88,12 +90,12 @@ func (d *Deployer) apply(ctx context.Context, name string, a *supervisor.App) er
 		return nil // prebuilt dev app: nothing to apply
 	}
 	spec := cfg.Base
-	if cur := d.currentRelease(name); cur != "" {
-		rel, err := d.release(ctx, name, cur)
+	if cur := d.currentBuild(name); cur != "" {
+		b, err := d.build(ctx, name, cur)
 		if err != nil {
 			return err
 		}
-		spec = d.specFor(cfg, rel)
+		spec = d.specFor(cfg, b)
 	}
 	return a.Update(ctx, spec)
 }
@@ -114,7 +116,7 @@ func (d *Deployer) Start(ctx context.Context, name string) error {
 		}
 	}
 	if err := a.Start(ctx); err != nil {
-		if errors.Is(err, supervisor.ErrNoRelease) {
+		if errors.Is(err, supervisor.ErrNotDeployed) {
 			return err
 		}
 		d.SetDesired(ctx, name, true)
@@ -189,7 +191,7 @@ func (d *Deployer) NeedsRestart(name string) bool {
 		sp.Concurrency != cfg.Base.Concurrency
 }
 
-// PurgeFiles removes an app's releases, logs and download workspaces.
+// PurgeFiles removes an app's builds, logs and download workspaces.
 // If keepData is false DATA_DIR is removed too; otherwise it is moved to
 // <root>/deleted/<app>-<unix>/data and its path returned.
 func (d *Deployer) PurgeFiles(name string, keepData bool, stamp int64) (string, error) {
@@ -218,6 +220,14 @@ func (d *Deployer) PurgeFiles(name string, keepData bool, stamp int64) (string, 
 	for _, p := range []string{d.Layout.AppDir(name), d.Layout.DownloadsDir(name)} {
 		if err := os.RemoveAll(p); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	if d.Cgroups != nil {
+		// The build group (Composer) is empty once the app is gone.
+		if g, err := d.Cgroups.Group(cgroup.Builds, name); err == nil {
+			if err := g.Remove(); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return kept, errors.Join(errs...)

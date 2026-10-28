@@ -6,7 +6,8 @@
 //
 //	<root>/                 phpboat.service (delegated)
 //	  supervisor/           phpboat itself
-//	  apps/<app>/           app runtime processes
+//	  apps/<app>/           app runtime processes (PHP-FPM, before_start, cron)
+//	  builds/<app>/         Composer while a build is prepared
 package cgroup
 
 import (
@@ -34,7 +35,8 @@ type Kind string
 
 // Group kinds.
 const (
-	Apps Kind = "apps"
+	Apps   Kind = "apps"
+	Builds Kind = "builds"
 )
 
 // wantedControllers are enabled wherever the kernel offers them.
@@ -80,7 +82,7 @@ func Setup(rootOverride string) (*Manager, error) {
 	if err := m.enableControllers(m.root); err != nil {
 		return nil, err
 	}
-	for _, k := range []Kind{Apps} {
+	for _, k := range []Kind{Apps, Builds} {
 		dir := filepath.Join(m.root, string(k))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("cgroup: create %s: %w", dir, err)
@@ -171,7 +173,7 @@ func (m *Manager) Group(kind Kind, name string) (*Group, error) {
 // phpboat crash in a dev setup. It returns the names of groups it cleaned.
 func (m *Manager) ReapStale(ctx context.Context) ([]string, error) {
 	var cleaned []string
-	for _, k := range []Kind{Apps} {
+	for _, k := range []Kind{Apps, Builds} {
 		entries, err := os.ReadDir(filepath.Join(m.root, string(k)))
 		if err != nil {
 			return cleaned, fmt.Errorf("cgroup: %w", err)

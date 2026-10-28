@@ -42,7 +42,7 @@ run = "app"
 docroot = "../up"
 health_path = "healthz"
 colour = "blue"
-persist = ["uploads"]
+persist = ["../escape"]
 
 [php]
 memory_limit = "lots"
@@ -56,7 +56,7 @@ run = "bin/x.php"
 		t.Fatal("accepted")
 	}
 	for _, want := range []string{"contract = 3", `unknown key "run"`, "docroot", "health_path", `unknown key "colour"`,
-		`"persist" is not supported by this phpboat version yet`, `"cron" is not supported`, "memory_limit", "display_errors is not supported"} {
+		`persist folder "../escape" must be a folder inside the repository`, `"cron" is not supported`, "memory_limit", "display_errors is not supported"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q:\n%v", want, err)
 		}

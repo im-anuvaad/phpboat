@@ -25,7 +25,7 @@ type Manifest struct {
 	App            string         `json:"app"`
 	Kind           string         `json:"kind"`
 	CreatedAt      time.Time      `json:"created_at"`
-	Release        string         `json:"release"`
+	Build          string         `json:"build"`
 	PhpboatVersion string         `json:"phpboat_version"`
 	Files          []ManifestFile `json:"files"`
 }

@@ -125,6 +125,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 type AppRow struct {
 	apps.App
 	Status        supervisor.Status
+	Commit        string // the commit of the running build ("" if never deployed)
 	Pending       int64
 	NeedsRestart  bool
 	MemBytes      int64
@@ -149,6 +150,7 @@ func (s *Server) appRows(ctx context.Context) ([]AppRow, error) {
 		row := AppRow{App: a}
 		if sa := s.Sup.Get(a.Name); sa != nil {
 			row.Status = sa.Status()
+			row.Commit = sa.Spec().CommitSHA
 			if gs, err := sa.Group().Stats(); err == nil {
 				row.MemBytes = gs.MemoryApp
 			}
@@ -235,7 +237,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 func formInput(r *http.Request) apps.Input {
 	f := func(k string) string { return r.PostFormValue(k) }
 	return apps.Input{
-		Repo: f("repo"), Domain: f("domain"),
+		Repo: f("repo"), Branch: f("branch"), Domain: f("domain"),
 		Memory: f("memory"), CPU: f("cpu"), Pids: f("pids"), Workers: f("workers"),
 		RestoreFrom: f("restore_from"),
 	}
@@ -272,6 +274,36 @@ func (s *Server) newAppData(ctx context.Context, in apps.Input, err error) map[s
 		}
 	}
 	return d
+}
+
+// repoBranches lists the branches of the repository in the ?repo= parameter,
+// for the branch picker on the Add app and Settings forms. The default
+// branch comes first in the answer.
+func (s *Server) repoBranches(w http.ResponseWriter, r *http.Request) {
+	repo, err := github.ParseRepo(r.URL.Query().Get("repo"))
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	token, err := s.Dep.GitHubToken(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	api := &github.API{Token: token}
+	cctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	info, err := api.Repository(cctx, repo)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	branches, err := api.Branches(cctx, repo)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"default": info.DefaultBranch, "branches": branches})
 }
 
 func (s *Server) githubToken(ctx context.Context) (string, bool) {
@@ -332,12 +364,27 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.App = full
-		data["Releases"], _ = s.Dep.Releases(r.Context(), name)
-		gh, err := s.Dep.GitHubReleases(r.Context(), name)
-		data["GitHubReleases"] = gh
-		if err != nil {
-			data["GitHubErr"] = err.Error()
+		builds, _ := s.Dep.Builds(r.Context(), name)
+		data["Builds"] = builds
+		deployed := ""
+		for _, b := range builds {
+			if b.Current {
+				data["Current"] = b
+				deployed = b.CommitSHA
+			}
 		}
+		commits, err := s.Dep.GitHubCommits(r.Context(), name)
+		if err != nil {
+			data["CommitsErr"] = err.Error()
+		}
+		views := make([]commitView, 0, len(commits))
+		for _, c := range commits {
+			views = append(views, commitView{Commit: c, Deployed: c.SHA == deployed})
+		}
+		if len(views) > 0 {
+			data["Commits"] = views
+		}
+		data["Behind"] = commitStatus(commits, deployed)
 		deps, _ := s.Dep.Deployments(r.Context(), name, 10)
 		data["Deployments"] = deps
 		if s.Backups != nil {
@@ -346,7 +393,7 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request) {
 			data["Policy"] = s.policyText()
 		}
 		data["Edit"] = apps.Input{
-			Repo: full.Repo, Domain: full.Domain,
+			Repo: full.Repo, Branch: full.Branch, Domain: full.Domain,
 			Memory: humanLimit(full.Limits.MemoryMax), CPU: strconv.FormatFloat(full.Limits.CPUMax, 'f', -1, 64),
 			Pids: strconv.Itoa(full.Limits.PidsMax), Workers: strconv.Itoa(full.Concurrency),
 		}
@@ -361,6 +408,31 @@ func (s *Server) appPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, http.StatusOK, "app", name, "apps", data)
 }
 
+// commitView is one commit on the app page.
+type commitView struct {
+	github.Commit
+	Deployed bool // the commit of the current build
+}
+
+// commitStatus says how far the deployed commit is behind the branch.
+func commitStatus(commits []github.Commit, deployed string) string {
+	if deployed == "" {
+		return "Nothing is deployed yet."
+	}
+	for i, c := range commits {
+		if c.SHA != deployed {
+			continue
+		}
+		if i == 0 {
+			return "The deployed commit is the newest one of the branch."
+		}
+		return fmt.Sprintf("%d new commit(s) on the branch since the deployed one.", i)
+	}
+	return fmt.Sprintf("The deployed commit is not among the newest %d commits of the branch.", ListCommits)
+}
+
+const ListCommits = deployer.ListCommits
+
 func humanLimit(n int64) string {
 	switch {
 	case n%(1<<30) == 0:
@@ -373,7 +445,17 @@ func humanLimit(n int64) string {
 
 func (s *Server) deployApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("app")
-	id, err := s.Dep.Deploy(r.Context(), name, r.PostFormValue("tag"))
+	id, err := s.Dep.Deploy(r.Context(), name, r.PostFormValue("commit"))
+	if err != nil {
+		redirect(w, r, "/apps/"+name, err, "")
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/deployments/%d", id), http.StatusSeeOther)
+}
+
+func (s *Server) rebuildApp(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("app")
+	id, err := s.Dep.Rebuild(r.Context(), name)
 	if err != nil {
 		redirect(w, r, "/apps/"+name, err, "")
 		return
@@ -383,7 +465,7 @@ func (s *Server) deployApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) rollbackApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("app")
-	id, err := s.Dep.Rollback(r.Context(), name, r.PostFormValue("release"))
+	id, err := s.Dep.Rollback(r.Context(), name, r.PostFormValue("build"))
 	if err != nil {
 		redirect(w, r, "/apps/"+name, err, "")
 		return
@@ -411,7 +493,7 @@ func (s *Server) appAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("app")
 	_, err := s.Apps.Update(r.Context(), name, formInput(r))
-	msg := "Settings saved. Limits need a restart; the domain is re-routed now."
+	msg := "Settings saved. Limits need a restart, a new branch applies to the next deploy, and the domain is re-routed now."
 	redirect(w, r, "/apps/"+name, err, msg)
 }
 
@@ -511,7 +593,7 @@ func (s *Server) setGitHubToken(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimSpace(r.PostFormValue("token"))
 	if r.PostFormValue("remove") == "1" {
 		err := s.Dep.SetGitHubToken(ctx, "")
-		s.Dep.ForgetReleases("")
+		s.Dep.ForgetCommits("")
 		s.Store.Writer().ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, settingGitHubLogin)
 		redirect(w, r, "/settings", err, "GitHub token removed.")
 		return
@@ -532,7 +614,7 @@ func (s *Server) setGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Store.SetSetting(ctx, settingGitHubLogin, []byte(info.Login))
-	s.Dep.ForgetReleases("")
+	s.Dep.ForgetCommits("")
 	redirect(w, r, "/settings", nil, "GitHub token saved (encrypted). It belongs to "+info.Login+".")
 }
 
