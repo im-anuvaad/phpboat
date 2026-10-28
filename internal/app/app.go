@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/im-anuvaad/phpboat/internal/cron/schedule"
 )
 
 // ContractVersion is the app contract version phpboat implements
@@ -45,6 +48,8 @@ type Spec struct {
 	// BeforeStart are PHP scripts (relative to BuildDir) run in order before
 	// every start of the app (docs/app-contract.md §8).
 	BeforeStart []string
+	// Cron are the [[cron]] jobs of the build, in phpboat.toml order.
+	Cron        []CronJob
 	PHP         map[string]string // the [php] settings of phpboat.toml (validated by the manifest)
 	Concurrency int               // PHP workers
 	Env         map[string]string // user env vars (reserved names rejected)
@@ -81,6 +86,59 @@ func NameFromRepo(repo string) (string, error) {
 	return n, nil
 }
 
+// Cron limits (docs/app-contract.md §3).
+const (
+	MaxCronJobs    = 10
+	MinCronTimeout = time.Second
+	MaxCronTimeout = time.Hour
+)
+
+// CronJob is one [[cron]] table of phpboat.toml: a PHP script that runs on a
+// schedule, in the build.
+type CronJob struct {
+	Schedule string `json:"schedule"`          // 5-field cron expression, UTC
+	Run      string `json:"run"`               // PHP script, relative to the build
+	Timeout  string `json:"timeout,omitempty"` // "30s", "5m", at most "1h"; "" = the gap to the next run, at most 1h
+}
+
+// Parsed returns the job's schedule.
+func (j CronJob) Parsed() (schedule.Schedule, error) { return schedule.Parse(j.Schedule) }
+
+// Limit is the job's explicit timeout, or 0 for the default.
+func (j CronJob) Limit() time.Duration {
+	d, _ := time.ParseDuration(j.Timeout)
+	return d
+}
+
+// ValidateCronJob checks one job's schedule, script path and timeout. Whether
+// the script exists in the repository is checked by the manifest.
+func ValidateCronJob(j CronJob) error { return errors.Join(CronJobErrors(j)...) }
+
+// CronJobErrors lists every problem with one job, one error per problem, so
+// callers can prefix each line.
+func CronJobErrors(j CronJob) []error {
+	var errs []error
+	if _, err := schedule.Parse(j.Schedule); err != nil {
+		errs = append(errs, fmt.Errorf("schedule %q: %w", j.Schedule, err))
+	}
+	switch {
+	case j.Run == "" || strings.HasPrefix(j.Run, "/") || strings.Contains(j.Run, ".."):
+		errs = append(errs, fmt.Errorf("run %q must be a path inside the build", j.Run))
+	case !strings.HasSuffix(j.Run, ".php"):
+		errs = append(errs, fmt.Errorf("run %q must be a .php file", j.Run))
+	}
+	if j.Timeout != "" {
+		d, err := time.ParseDuration(j.Timeout)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("timeout %q: use a duration like \"30s\" or \"5m\"", j.Timeout))
+		case d < MinCronTimeout || d > MaxCronTimeout:
+			errs = append(errs, fmt.Errorf("timeout %q must be from 1s to 1h", j.Timeout))
+		}
+	}
+	return errs
+}
+
 // ValidateEnvName checks a user-supplied env var name.
 func ValidateEnvName(name string) error {
 	if !envNameRe.MatchString(name) {
@@ -115,6 +173,14 @@ func (s *Spec) Validate() error {
 			if !strings.HasSuffix(b, ".php") || strings.HasPrefix(b, "/") || strings.Contains(b, "..") {
 				errs = append(errs, fmt.Errorf("app %q: before_start %q must be a .php file inside the build", s.Name, b))
 			}
+		}
+	}
+	if len(s.Cron) > MaxCronJobs {
+		errs = append(errs, fmt.Errorf("app %q: at most %d cron jobs (it has %d)", s.Name, MaxCronJobs, len(s.Cron)))
+	}
+	for i, j := range s.Cron {
+		for _, err := range CronJobErrors(j) {
+			errs = append(errs, fmt.Errorf("app %q: cron job %d: %w", s.Name, i+1, err))
 		}
 	}
 	if s.Concurrency == 0 {

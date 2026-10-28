@@ -59,6 +59,13 @@ timeout  = "10m"                     # default: until the next run, at most 1 h
 
 Unknown keys fail the deploy, so typos don't go unnoticed. All paths are relative to the repo root and must stay inside it.
 
+**`[[cron]]` rules** (at most 10 jobs per app; every problem in the file is reported at once):
+
+- `schedule`: five fields, in UTC: minute (0-59), hour (0-23), day of month (1-31), month (1-12), day of week (0-7, where 0 and 7 are Sunday). A field takes `*`, numbers, `a-b`, `a,b`, `*/n` and `a-b/n`. Names (`jan`, `mon`) and macros (`@daily`) are not supported. Times are checked to the minute. If both day fields are restricted (don't start with `*`), a day matches when either one matches; otherwise both must. A schedule that never matches (e.g. February 31) fails the deploy.
+- `run`: a `.php` file in the repository, not inside a `persist` folder. It must exist, and it can't be a symbolic link.
+- `timeout`: a duration such as `"30s"` or `"5m"`, from 1 s to 1 h. The default is the time until the job's next run, at most 1 h. A run that goes past its timeout is killed and recorded as `timeout`.
+- A job runs as the app's user, with the app's env vars and the same PHP settings as the `before_start` scripts.
+
 **`docroot = "."`** serves the repo root (index.php next to composer.json). It works, but then phpboat also refuses `vendor/`, `composer.json`, `composer.lock`, `phpboat.toml` and any `*.sqlite`, `*.db`, `*.sql`, `*.log` path. Prefer `public/`.
 
 ## 4. Files and folders
@@ -122,8 +129,10 @@ Deploy ─► download commit ─► composer install ─► [503] stop ─► b
 ```
 
 - `before_start` scripts and cron jobs run as `php <script>` from the code's root, with your env vars. Exit code 0 = success.
-- A cron run is skipped (and logged) if the previous run of the same job is still going, or while the app is stopped or deploying.
-- Output of scripts and cron jobs goes to the app's log.
+- A due cron run is recorded as `skipped` if the app is being deployed or restored, or if the previous run of the same job is still going. Nothing is recorded while the app is stopped or crashed. The app page lists each job's last 10 runs, from the last 20 kept.
+- Output of cron jobs goes to the app's log, each line tagged `cron:<n>` (`n` is the job's position in `phpboat.toml`). A deploy stops the app's cron jobs first: running jobs get 30 seconds to finish, then they are killed and recorded as `killed`.
+- Jobs due while phpboat is down do not run afterwards.
+- Output of `before_start` scripts goes to the app's log.
 
 ## 9. Limits (defaults, editable per app)
 

@@ -75,6 +75,7 @@ func (d *Deployer) Forget(ctx context.Context, name string) error {
 		`DELETE FROM builds WHERE app = ?`,
 		`DELETE FROM deployments WHERE app = ?`,
 		`DELETE FROM app_state WHERE app = ?`,
+		`DELETE FROM cron_runs WHERE app = ?`,
 	} {
 		if _, err := d.db.Writer().ExecContext(ctx, q, name); err != nil {
 			return err

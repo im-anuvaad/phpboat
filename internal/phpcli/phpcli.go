@@ -1,12 +1,13 @@
 // Package phpcli runs PHP CLI commands for an app: Composer while a build is
-// prepared, and before_start scripts before a start. The command runs as the
-// app's user, inside a cgroup, with exactly the environment it is given, and
-// is killed when it outlives its timeout (docs/plan.md §5, §8).
+// prepared, before_start scripts before a start, and cron jobs. The command
+// runs as the app's user, inside a cgroup, with exactly the environment it is
+// given, and is killed when it outlives its timeout (docs/plan.md §5, §8).
 package phpcli
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,13 @@ type Command struct {
 	User   users.User        // the app user the process runs as
 	Group  *cgroup.Group     // the cgroup the process starts in
 	Log    *logs.Log         // receives every output line (may be nil)
+	// Prefix is put in front of every output line in Log (cron jobs use "cron:<n> ").
+	Prefix string
+	// SharedGroup is set when other processes live in Group as well (a cron
+	// job runs next to its app's PHP-FPM workers). Then only the command's own
+	// process group is killed, when it times out and when it has exited; the
+	// cgroup is left alone.
+	SharedGroup bool
 }
 
 // Result is how a command ended.
@@ -49,6 +57,9 @@ const tailSize = 4096
 // An error means the command could not be started at all; a non-zero exit
 // is reported in the Result.
 func Run(ctx context.Context, c Command) (Result, error) {
+	if ctx.Err() != nil {
+		return Result{ExitCode: -1, TimedOut: true}, nil
+	}
 	fd, err := c.Group.OpenFD()
 	if err != nil {
 		return Result{}, err
@@ -93,6 +104,7 @@ func Run(ctx context.Context, c Command) (Result, error) {
 		return Result{}, fmt.Errorf("start %s: %w", c.Binary, err)
 	}
 	w.Close()
+	pid := cmd.Process.Pid
 
 	tail := &ring{max: tailSize}
 	copied := make(chan struct{})
@@ -100,7 +112,7 @@ func Run(ctx context.Context, c Command) (Result, error) {
 		defer close(copied)
 		src := io.TeeReader(r, tail)
 		if c.Log != nil {
-			c.Log.Capture(logs.Stdout, src)
+			capture(c.Log, c.Prefix, src)
 			return
 		}
 		io.Copy(io.Discard, src)
@@ -114,14 +126,14 @@ func Run(ctx context.Context, c Command) (Result, error) {
 	case <-waited:
 	case <-ctx.Done():
 		res.TimedOut = true
-		c.Group.Kill()
+		c.kill(pid)
 		<-waited
 	}
 	// Processes the command started (git, for one) can keep the output pipe
 	// open after it exited. Kill them so the copy ends.
-	c.Group.Kill()
+	c.kill(pid)
 	wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	c.Group.WaitEmpty(wctx)
+	c.waitGone(wctx, pid)
 	cancel()
 	select {
 	case <-copied:
@@ -133,6 +145,52 @@ func Run(ctx context.Context, c Command) (Result, error) {
 	}
 	res.Tail = tail.String()
 	return res, nil
+}
+
+// kill stops the command and whatever it still runs: its whole cgroup, or
+// only its process group in a shared cgroup.
+func (c Command) kill(pid int) {
+	if c.SharedGroup {
+		// Setpgid made the command the leader of its own process group.
+		_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH: nothing left
+		return
+	}
+	c.Group.Kill()
+}
+
+// waitGone waits until nothing of the command is left (or ctx ends).
+func (c Command) waitGone(ctx context.Context, pid int) {
+	if !c.SharedGroup {
+		c.Group.WaitEmpty(ctx)
+		return
+	}
+	t := time.NewTicker(25 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// capture reads lines from r until EOF and writes each to l, prefixed. Lines
+// longer than logs.MaxLineBytes are split, as logs.Log.Capture does.
+func capture(l *logs.Log, prefix string, r io.Reader) {
+	br := bufio.NewReaderSize(r, logs.MaxLineBytes)
+	for {
+		chunk, isPrefix, err := br.ReadLine()
+		if len(chunk) > 0 || (err == nil && !isPrefix) {
+			l.Write(logs.Stdout, prefix+strings.TrimSuffix(string(chunk), "\r"))
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // LastLine returns the last non-empty line of s (for one-line error messages).

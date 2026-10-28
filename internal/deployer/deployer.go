@@ -103,6 +103,17 @@ type Deps struct {
 	// Phase 5 plugs the full-data backup in here. A returned error aborts the
 	// deploy and restarts the old build.
 	PreDeploy func(ctx context.Context, app string, log *logs.Log) error
+	// Cron stops an app's scheduled jobs before the app is stopped for a
+	// switch (docs/plan.md §5 step 7). Set by serve.go; nil means no jobs.
+	Cron CronDrainer
+}
+
+// CronDrainer is implemented by the cron scheduler (internal/cron). The
+// deployer needs only this call, so it does not import that package.
+type CronDrainer interface {
+	// Drain stops app's jobs and reports how many were running and how many
+	// of them were killed.
+	Drain(ctx context.Context, app string) (running, killed int)
 }
 
 // Deployer runs deployments.
@@ -115,7 +126,8 @@ type Deployer struct {
 	apps      map[string]AppConfig
 	pending   map[string]int64  // app -> queued or running deployment
 	held      map[string]string // app -> reason (e.g. a restore) that blocks deployments
-	deploying map[string]bool   // app is between "stop old" and "healthy/failed"
+	deploying map[string]bool   // app is between "stop old" and "healthy/failed" (served 503)
+	draining  map[string]bool   // cron jobs are being stopped before the app goes down
 	commits   map[string]cachedCommits
 
 	queue  chan job
@@ -151,6 +163,7 @@ func New(ctx context.Context, d Deps) (*Deployer, error) {
 		pending:   map[string]int64{},
 		held:      map[string]string{},
 		deploying: map[string]bool{},
+		draining:  map[string]bool{},
 		commits:   map[string]cachedCommits{},
 		queue:     make(chan job, 64),
 	}
@@ -198,6 +211,7 @@ func (d *Deployer) specFor(cfg AppConfig, b Build) app.Spec {
 	s.HealthPath = b.Manifest.HealthPath
 	s.PHP = b.Manifest.PHP
 	s.BeforeStart = b.Manifest.BeforeStart
+	s.Cron = b.Manifest.Cron
 	return s
 }
 
@@ -216,6 +230,25 @@ func (d *Deployer) Deploying(appName string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.deploying[appName]
+}
+
+// Busy reports whether app is being drained, is in the downtime window of a
+// deploy, or is reserved for a restore. Cron jobs don't start then.
+func (d *Deployer) Busy(appName string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.deploying[appName] || d.draining[appName] || d.held[appName] != ""
+}
+
+// setFlag sets or clears one per-app flag of the deployer.
+func (d *Deployer) setFlag(flags map[string]bool, name string, on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if on {
+		flags[name] = true
+	} else {
+		delete(flags, name)
+	}
 }
 
 // Deploy queues a deploy of commit sha of the app's branch.
@@ -507,23 +540,26 @@ func (d *Deployer) activate(ctx context.Context, cfg AppConfig, b Build, id int6
 	prevSpec := a.Spec()
 	prevState := a.Status().State
 	wasRunning := prevState == supervisor.Running || prevState == supervisor.Starting || prevState == supervisor.Backoff
-	d.setStatus(id, StatusDeploying)
-
-	d.mu.Lock()
-	d.deploying[name] = true
-	d.mu.Unlock()
-	downStart := time.Now()
-	defer func() {
-		d.mu.Lock()
-		delete(d.deploying, name)
-		d.mu.Unlock()
-	}()
-
 	// Detached from the job context so a shutdown mid-switch still leaves
 	// a consistent state.
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activateTimeout)
 	defer cancel()
 
+	// Cron jobs stop first, while the app keeps serving: no job starts from
+	// here on (Busy), running ones get 30 s, then they are killed. Only after
+	// that does the app go into its downtime window.
+	d.setFlag(d.draining, name, true)
+	defer d.setFlag(d.draining, name, false)
+	if d.Cron != nil {
+		if running, killed := d.Cron.Drain(sctx, name); running > 0 {
+			lg.Writef("cron: %d job(s) were running; %d were still running after the grace period and were killed", running, killed)
+		}
+	}
+
+	d.setStatus(id, StatusDeploying)
+	d.setFlag(d.deploying, name, true)
+	downStart := time.Now()
+	defer d.setFlag(d.deploying, name, false)
 	if prevSpec.BuildID != "" {
 		lg.Writef("stopping build %s (state %s)", prevSpec.BuildID, prevState)
 	}
