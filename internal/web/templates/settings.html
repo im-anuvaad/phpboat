@@ -83,7 +83,7 @@
 
 <section class="card" id="backups">
   <h2>Backups</h2>
-  <p class="muted">App databases are backed up {{.Data.Policy}}, into one folder per app at the root of the bucket (<code>&lt;app&gt;/</code>). Works with Cloudflare R2, Backblaze B2, AWS S3, MinIO or any S3-compatible storage; use a bucket for phpboat only.</p>
+  <p class="muted">Each app's data folder (DATA_DIR: its SQLite databases, uploads and other files, up to 2 GB) is backed up {{.Data.Policy}}, into one folder per app at the root of the bucket (<code>&lt;app&gt;/</code>). Works with Cloudflare R2, Backblaze B2, AWS S3, MinIO or any S3-compatible storage; use a bucket for phpboat only.</p>
   {{with .Data.S3}}<p>Bucket <b>{{.Bucket}}</b> at {{.Endpoint}} (region {{.Region}}, key <code>{{.AccessKey}}</code>). The secret is stored encrypted.</p>{{end}}
   <form method="post" action="/settings/s3" class="grid">
     {{template "csrf" $csrf}}

@@ -13,7 +13,7 @@ import (
 )
 
 // Folders lists the backup folders in the bucket (one per app name), for
-// the Add app form (docs/architecture.md). ok is false without a bucket.
+// the Add app form. ok is false without a bucket.
 func (s *Service) Folders(ctx context.Context) (folders []string, ok bool, err error) {
 	cl, _, ok, err := s.client(ctx)
 	if err != nil || !ok {
@@ -31,9 +31,12 @@ func (s *Service) Folders(ctx context.Context) (folders []string, ok bool, err e
 	return folders, true, nil
 }
 
-// RestoreFolder puts the newest backup in the bucket folder into the empty
-// DATA_DIR of a new app, after verifying it completely (manifest checksums
-// and quick_check). The folder may belong to another name (a renamed repo).
+// RestoreFolder puts the newest backup in a bucket folder into the empty
+// DATA_DIR of a new app (a new server, or an app that was deleted). The
+// archive is verified completely in staging before anything is moved into
+// DATA_DIR. The folder may have another name than the app (a renamed repo),
+// but the archive must have been made under the folder's name. It returns
+// the top-level names that were restored.
 func (s *Service) RestoreFolder(ctx context.Context, app, folder string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -56,10 +59,12 @@ func (s *Service) RestoreFolder(ctx context.Context, app, folder string) ([]stri
 		return nil, fmt.Errorf("the folder %s/ has no backups", folder)
 	}
 	dataDir := s.Layout.DataDir(app)
-	if dbs, err := FindDatabases(dataDir); err != nil {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
 		return nil, err
-	} else if len(dbs) > 0 {
-		return nil, fmt.Errorf("%s already has databases in DATA_DIR; use Restore on the app page instead", app)
+	}
+	if len(entries) > 0 {
+		return nil, fmt.Errorf("%s already has data in DATA_DIR; restore from the app page instead", app)
 	}
 	uid, gid, err := s.Hooks.Owner(app)
 	if err != nil {
@@ -74,12 +79,45 @@ func (s *Service) RestoreFolder(ctx context.Context, app, folder string) ([]stri
 	if err := cl.GetFile(ctx, o.Key, archive); err != nil {
 		return nil, err
 	}
-	files, err := UnpackInto(ctx, archive, work, dataDir, folder, uid, gid)
+	m, err := readManifest(archive)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", o.Key, err)
 	}
-	s.Log.Info("restored a bucket folder into a new app", "app", app, "folder", folder, "key", o.Key, "files", files)
-	return files, nil
+	if m.App != folder {
+		return nil, fmt.Errorf("%s holds backups of %s, not %s", o.Key, m.App, folder)
+	}
+	inv := inventoryOf(m)
+	if err := checkFree(dataDir, inv.Bytes, "restore"); err != nil {
+		return nil, err
+	}
+	out := filepath.Join(work, "out")
+	if err := os.Mkdir(out, 0o700); err != nil {
+		return nil, err
+	}
+	staged, skipped, err := s.stageVerified(ctx, archive, out, uid, gid)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", o.Key, err)
+	}
+	if err := sameDevice(out, dataDir); err != nil {
+		return nil, err
+	}
+	mv := &mover{}
+	if err := placeStaged(out, dataDir, mv); err != nil {
+		if uerr := mv.undo(); uerr != nil {
+			err = fmt.Errorf("%w; undoing it also failed: %v", err, uerr)
+		}
+		return nil, err
+	}
+	var names []string
+	for _, e := range staged.Entries {
+		if !strings.Contains(e.Path, "/") {
+			names = append(names, e.Path)
+		}
+	}
+	sort.Strings(names)
+	s.Log.Info("restored a bucket folder into a new app", "app", app, "folder", folder, "key", o.Key,
+		"content", inventoryOf(staged).String(), "skipped_links", skipped)
+	return names, nil
 }
 
 // Newest returns the newest backup object by the time in its name, skipping
@@ -96,45 +134,4 @@ func Newest(objs []s3.Object) (s3.Object, bool) {
 	}
 	sort.Slice(ok, func(i, j int) bool { return objTime(ok[i]).After(objTime(ok[j])) })
 	return ok[0], true
-}
-
-// UnpackInto verifies archive (manifest checksums, quick_check) in a
-// temporary folder under staging and only then copies the databases into
-// dataDir owned by uid:gid. The manifest must name wantApp.
-func UnpackInto(ctx context.Context, archive, staging, dataDir, wantApp string, uid, gid int) ([]string, error) {
-	work, err := os.MkdirTemp(staging, "unpack-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(work)
-	m, err := extractArchive(archive, work)
-	if err != nil {
-		return nil, err
-	}
-	if m.App != wantApp {
-		return nil, fmt.Errorf("archive contains %s, not %s", m.App, wantApp)
-	}
-	var files []string
-	for _, f := range m.Files {
-		if err := QuickCheck(ctx, filepath.Join(work, f.Path)); err != nil {
-			return nil, fmt.Errorf("%s: %w", f.Path, err)
-		}
-		files = append(files, f.Path)
-	}
-	for _, f := range m.Files {
-		dst := filepath.Join(dataDir, f.Path)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return nil, err
-		}
-		for d := filepath.Dir(dst); d != dataDir && strings.HasPrefix(d, dataDir); d = filepath.Dir(d) {
-			os.Chown(d, uid, gid)
-		}
-		if err := copyFile(filepath.Join(work, f.Path), dst); err != nil {
-			return nil, err
-		}
-		if err := os.Chown(dst, uid, gid); err != nil {
-			return nil, err
-		}
-	}
-	return files, nil
 }

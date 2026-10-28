@@ -111,8 +111,8 @@ func serve(log *slog.Logger) error {
 	}
 	dep.PreDeploy = func(ctx context.Context, name string, lg *logs.Log) error {
 		_, err := bk.Run(ctx, name, backup.KindPreDeploy, false, lg)
-		if errors.Is(err, backup.ErrNoDatabases) {
-			lg.Writef("pre-deploy backup: no SQLite databases in DATA_DIR yet; nothing to back up")
+		if errors.Is(err, backup.ErrEmpty) {
+			lg.Writef("pre-deploy backup: DATA_DIR is empty; nothing to back up")
 			return nil
 		}
 		return err

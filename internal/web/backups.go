@@ -36,11 +36,11 @@ func (s *Server) backupNow(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
 	b, err := s.Backups.Run(ctx, name, backup.KindManual, true, nil)
-	if errors.Is(err, backup.ErrNoDatabases) {
-		redirect(w, r, "/apps/"+name+"#backups", errors.New("nothing to back up: the app has no SQLite databases in its DATA_DIR yet"), "")
+	if errors.Is(err, backup.ErrEmpty) {
+		redirect(w, r, "/apps/"+name+"#backups", errors.New("nothing to back up: the app's DATA_DIR is empty"), "")
 		return
 	}
-	msg := fmt.Sprintf("Backup #%d taken (%d database(s)).", b.ID, b.Files)
+	msg := fmt.Sprintf("Backup #%d taken: %s.", b.ID, b.Inventory().String())
 	switch {
 	case err != nil:
 	case b.Uploaded():
@@ -64,17 +64,23 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Backups.Restore(ctx, name, id, nil)
 	if err != nil {
-		redirect(w, r, "/apps/"+name+"#backups", fmt.Errorf("restore failed, nothing was changed: %w", err), "")
+		redirect(w, r, "/apps/"+name+"#backups", fmt.Errorf("restore failed: %w", err), "")
 		return
 	}
-	msg := fmt.Sprintf("Backup #%d restored (%s).", id, strings.Join(res.Files, ", "))
-	if res.MovedTo != "" {
-		msg += " The previous databases were moved to " + res.MovedTo + "."
+	msg := fmt.Sprintf("Backup #%d restored: %s.", id, res.Counts.String())
+	if len(res.SkippedLinks) > 0 {
+		msg += fmt.Sprintf(" Not restored, because they point outside the data folder: %s.", strings.Join(res.SkippedLinks, ", "))
 	}
-	if res.StartError != "" {
+	if res.MovedTo != "" {
+		msg += " The data it replaced was moved to " + res.MovedTo + "."
+	}
+	switch {
+	case res.StartError != "":
 		err = fmt.Errorf("%s But the app did not start again: %s", msg, res.StartError)
-	} else if res.Restarted {
+	case res.Restarted:
 		msg += " The app was restarted."
+	case !res.WasRunning:
+		msg += " The app was stopped before the restore, so it is still stopped."
 	}
 	redirect(w, r, "/apps/"+name+"#backups", err, msg)
 }
