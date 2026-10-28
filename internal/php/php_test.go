@@ -117,15 +117,29 @@ func TestWatch(t *testing.T) {
 	changed := make(chan [2]string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go r.Watch(ctx, 20*time.Millisecond, func(o, n string) { changed <- [2]string{o, n} })
-	time.Sleep(60 * time.Millisecond)
-	os.WriteFile(bin, []byte("two, longer"), 0o755)
-	select {
-	case c := <-changed:
-		if c[0] == c[1] || !strings.Contains(c[1], "11 bytes") {
-			t.Errorf("%q", c)
+	go r.Watch(ctx, 20*time.Millisecond, func(o, n string) {
+		select {
+		case changed <- [2]string{o, n}:
+		default:
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no change reported")
+	})
+	// Watch takes its first reading only once its goroutine runs Build, which
+	// starts dpkg-query. On a busy machine that can take longer than any fixed
+	// sleep, so keep writing a file of a new size until a change is reported.
+	deadline := time.After(5 * time.Second)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for size := 4; ; size++ {
+		select {
+		case c := <-changed:
+			if c[0] == c[1] || !strings.Contains(c[1], " bytes") {
+				t.Errorf("%q", c)
+			}
+			return
+		case <-tick.C:
+			os.WriteFile(bin, []byte(strings.Repeat("x", size)), 0o755)
+		case <-deadline:
+			t.Fatal("no change reported")
+		}
 	}
 }
