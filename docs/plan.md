@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 is on hold until the user asks for it. Ubuntu 24.04 is untested: v1 is tested on 26.04 only, and a 24.04 test run comes after v1 (not scheduled yet).** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 in progress: the end-to-end run on 26.04 with R2 passed ([phase 8 results](phase8-e2e-results.md)); the final docs and the v1.0.0 tag are left. Ubuntu 24.04 is untested: v1 is tested on 26.04 only, and a 24.04 test run comes after v1 (not scheduled yet).** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -224,6 +224,6 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 | **5. Full-data backups** ✅ | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server ([results](phase5-7-results.md)) |
 | **6. Cron** ✅ | `phpboat.toml` cron parsing, scheduler, no-overlap, timeouts, history, app page section | jobs run, skip while deploying, show history ([results](phase5-7-results.md)) |
 | **7. Installer** ✅ | apt packages, masked distro FPM, pinned Composer, both Ubuntu releases; PHP version on home page + API | fresh install and update on 24.04 and 26.04: 26.04 done, 24.04 untested ([results](phase5-7-results.md)) |
-| **8. Docs + v1.0.0** | README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on 26.04 (24.04: after v1, not scheduled yet) |
+| **8. Docs + v1.0.0** | end-to-end run on a real VPS with R2 ✅ ([results](phase8-e2e-results.md)); README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on 26.04 (24.04: after v1, not scheduled yet) |
 
 Phases 2 and 4 don't depend on each other and can run in parallel after phase 1; 5 and 6 need 4.
