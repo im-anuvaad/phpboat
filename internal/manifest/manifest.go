@@ -34,12 +34,13 @@ const (
 // Manifest is a validated phpboat.toml (or the defaults without one). It is
 // stored with each build, so later starts use what the build was made with.
 type Manifest struct {
-	Contract    int          `json:"contract"`
-	Docroot     string       `json:"docroot"` // "public", "." or another folder, relative to the repository root
-	HealthPath  string       `json:"health_path"`
-	Persist     []string     `json:"persist,omitempty"`      // folders kept in DATA_DIR across deploys
-	BeforeStart []string     `json:"before_start,omitempty"` // PHP scripts run before every start
-	PHP         php.Settings `json:"php,omitempty"`
+	Contract    int           `json:"contract"`
+	Docroot     string        `json:"docroot"` // "public", "." or another folder, relative to the repository root
+	HealthPath  string        `json:"health_path"`
+	Persist     []string      `json:"persist,omitempty"`      // folders kept in DATA_DIR across deploys
+	BeforeStart []string      `json:"before_start,omitempty"` // PHP scripts run before every start
+	Cron        []app.CronJob `json:"cron,omitempty"`         // [[cron]] jobs, in order (at most 10)
+	PHP         php.Settings  `json:"php,omitempty"`
 }
 
 // Default is the manifest of a repo without phpboat.toml.
@@ -53,12 +54,20 @@ type raw struct {
 	HealthPath  *string        `toml:"health_path"`
 	Persist     []string       `toml:"persist"`
 	BeforeStart []string       `toml:"before_start"`
+	Cron        []rawCron      `toml:"cron"`
 	PHP         map[string]any `toml:"php"`
 }
 
+// rawCron is one [[cron]] table as written.
+type rawCron struct {
+	Schedule *string `toml:"schedule"`
+	Run      *string `toml:"run"`
+	Timeout  *string `toml:"timeout"`
+}
+
 // later lists contract keys this phpboat does not implement yet, so they
-// fail with a clear message instead of "unknown key".
-var later = map[string]bool{"cron": true}
+// fail with a clear message instead of "unknown key". Empty for now.
+var later = map[string]bool{}
 
 // Load reads dir/phpboat.toml (defaults if there is none) and checks the
 // repository against it: the docroot, persist folders and before_start
@@ -125,6 +134,12 @@ func checkTree(dir string, m Manifest) error {
 			errs = append(errs, fmt.Errorf("before_start script %q is not a file in the repository", b))
 		}
 	}
+	for _, j := range m.Cron {
+		fi, err := lstatUnder(dir, j.Run)
+		if err != nil || !fi.Mode().IsRegular() {
+			errs = append(errs, fmt.Errorf("cron script %q is not a file in the repository", j.Run))
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -160,15 +175,14 @@ func Parse(b []byte) (Manifest, error) {
 	seen := map[string]bool{}
 	for _, k := range md.Undecoded() {
 		top := k[0]
-		if seen[top] {
+		if later[top] {
+			if !seen[top] {
+				seen[top] = true
+				errs = append(errs, fmt.Errorf("%q is not supported by this phpboat version yet", top))
+			}
 			continue
 		}
-		seen[top] = true
-		if later[top] {
-			errs = append(errs, fmt.Errorf("%q is not supported by this phpboat version yet", top))
-		} else {
-			errs = append(errs, fmt.Errorf("unknown key %q", k.String()))
-		}
+		errs = append(errs, fmt.Errorf("unknown key %q", k.String()))
 	}
 	switch {
 	case r.Contract == nil:
@@ -197,6 +211,9 @@ func Parse(b []byte) (Manifest, error) {
 	before, berrs := cleanBeforeStart(r.BeforeStart, persist)
 	errs = append(errs, berrs...)
 	m.BeforeStart = before
+	cron, cerrs := cleanCron(r.Cron, persist)
+	errs = append(errs, cerrs...)
+	m.Cron = cron
 	if len(r.PHP) > 0 {
 		set := php.Settings{}
 		for k, v := range r.PHP {
@@ -270,6 +287,54 @@ func cleanPersist(list []string, docroot string) ([]string, []error) {
 			}
 		}
 		out = append(out, c)
+	}
+	return out, errs
+}
+
+// cleanCron validates the [[cron]] tables. Every problem is reported; a job
+// with a problem is left out (the manifest fails anyway).
+func cleanCron(list []rawCron, persist []string) ([]app.CronJob, []error) {
+	if len(list) > app.MaxCronJobs {
+		return nil, []error{fmt.Errorf("[[cron]] lists %d jobs; an app may have at most %d", len(list), app.MaxCronJobs)}
+	}
+	var errs []error
+	var out []app.CronJob
+	for i, r := range list {
+		n := i + 1
+		if r.Schedule == nil {
+			errs = append(errs, fmt.Errorf(`[[cron]] #%d: schedule is required (5 fields in UTC, e.g. "0 3 * * *")`, n))
+			continue
+		}
+		if r.Run == nil {
+			errs = append(errs, fmt.Errorf(`[[cron]] #%d: run is required (a .php file in the repository, e.g. "bin/cleanup.php")`, n))
+			continue
+		}
+		j := app.CronJob{Schedule: *r.Schedule}
+		if r.Timeout != nil {
+			j.Timeout = *r.Timeout
+		}
+		// An invalid path is kept as written, so ValidateCronJob reports it.
+		c, ok := cleanRel(*r.Run)
+		if !ok {
+			c = *r.Run
+		}
+		j.Run = c
+		bad := false
+		for _, err := range app.CronJobErrors(j) {
+			errs = append(errs, fmt.Errorf("[[cron]] #%d: %w", n, err))
+			bad = true
+		}
+		if ok && strings.HasSuffix(c, ".php") {
+			for _, p := range persist {
+				if within(c, p) {
+					errs = append(errs, fmt.Errorf("[[cron]] #%d: run %q is inside persist folder %q, which is linked to DATA_DIR and never runs", n, c, p))
+					bad = true
+				}
+			}
+		}
+		if !bad {
+			out = append(out, j)
+		}
 	}
 	return out, errs
 }

@@ -49,14 +49,15 @@ memory_limit = "lots"
 display_errors = "1"
 
 [[cron]]
-schedule = "* * * * *"
+schedule = "61 * * * *"
 run = "bin/x.php"
+timeout = "2h"
 `))
 	if err == nil {
 		t.Fatal("accepted")
 	}
 	for _, want := range []string{"contract = 3", `unknown key "run"`, "docroot", "health_path", `unknown key "colour"`,
-		`persist folder "../escape" must be a folder inside the repository`, `"cron" is not supported`, "memory_limit", "display_errors is not supported"} {
+		`persist folder "../escape" must be a folder inside the repository`, `[[cron]] #1: schedule "61 * * * *"`, `timeout "2h" must be from 1s to 1h`, "memory_limit", "display_errors is not supported"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q:\n%v", want, err)
 		}
