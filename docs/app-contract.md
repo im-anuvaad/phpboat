@@ -74,7 +74,7 @@ Unknown keys fail the deploy, so typos don't go unnoticed. All paths are relativ
 - The code is read-only. Writing next to your scripts fails; write to `DATA_DIR`, a `persist` folder or `TMPDIR`.
 - A `persist` folder's committed content (e.g. a `.gitkeep`, default images) is copied in on the first deploy only. Later deploys never overwrite what's there.
 - Files in a `persist` folder inside the docroot are served as static files, never executed as PHP.
-- **Backups** take the whole `DATA_DIR`. SQLite databases are copied as consistent snapshots. Every other file is copied as it is at that moment, so each file is consistent only by itself: a file written during the backup may be the previous version, or missing if it was deleted meanwhile. Symbolic links are kept as links and never followed; sockets and other special files are skipped; `.pre-restore-*` folders are never backed up. Limit: 2 GB of content per app.
+- **Backups** take the whole `DATA_DIR`. SQLite databases are copied as consistent snapshots. Every other file is copied as it is at that moment, so each file is consistent only by itself: a file written during the backup may be the previous version, or missing if it was deleted meanwhile. Symbolic links are kept as links and never followed; sockets and other special files are skipped; `.pre-restore-*` folders are never backed up. Limit: 2 GB of content per app. A manual or scheduled backup above it fails. A pre-deploy backup above it is skipped with a warning in the deploy log, and the deploy goes ahead without it.
 - **Restore** replaces the whole `DATA_DIR`. The data it replaces is moved to `DATA_DIR/.pre-restore-<unix-time>/` (the newest two are kept). Links that point outside `DATA_DIR` are not put back.
 
 ## 5. SQLite
@@ -91,7 +91,7 @@ $db->exec('PRAGMA foreign_keys = ON');
 $db->exec('PRAGMA synchronous = NORMAL');
 ```
 
-Migrations go in a `before_start` script. phpboat backs up the data right before every deploy, so a bad migration can be undone with **Restore**. Rolling back the code does not roll back the database: keep migrations forward-only and compatible with the previous commit.
+Migrations go in a `before_start` script. phpboat backs up the data right before every deploy (unless the data is over 2 GB, see §4), so a bad migration can be undone with **Restore**. Rolling back the code does not roll back the database: keep migrations forward-only and compatible with the previous commit.
 
 ## 6. PHP
 

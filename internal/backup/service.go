@@ -61,6 +61,10 @@ const (
 // ErrEmpty means DATA_DIR has nothing in it yet, so there is nothing to back up.
 var ErrEmpty = errors.New("DATA_DIR is empty")
 
+// ErrTooLarge means DATA_DIR holds more than MaxContentBytes, so the backup is
+// not taken.
+var ErrTooLarge = errors.New("data folder too large to back up")
+
 // Backup is one row of the backups table.
 type Backup struct {
 	ID           int64     `json:"id"`
