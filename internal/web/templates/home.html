@@ -6,6 +6,7 @@
   <div><b>{{printf "%.2f" .Load1}}</b><small>load ({{.CPUs}} CPU)</small></div>
   <div><b>{{pct .MemUsedPct}}</b><small>memory of {{bytes .MemTotal}}</small></div>
   <div><b>{{pct .DiskUsedPct}}</b><small>disk · {{bytes .DiskFree}} free</small></div>
+  {{with $.Data.PHP}}<div><b>PHP {{.Version}}</b><small>{{.Package}}</small></div>{{end}}
 </section>
 {{end}}
 
