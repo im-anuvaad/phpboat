@@ -27,6 +27,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/edge"
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/metrics"
+	"github.com/im-anuvaad/phpboat/internal/php"
 	"github.com/im-anuvaad/phpboat/internal/store"
 	"github.com/im-anuvaad/phpboat/internal/supervisor"
 )
@@ -56,6 +57,10 @@ type Server struct {
 	Layout     layout.Layout
 	Version    string
 	Log        *slog.Logger
+	// PHP returns the host's PHP runtime and its installed php-fpm package
+	// version ("8.5.4-0ubuntu1.5") from a cache, so no request runs dpkg. The
+	// zero Runtime means no PHP is installed. Nil in tests.
+	PHP func() (php.Runtime, string)
 
 	pages map[string]*template.Template
 }

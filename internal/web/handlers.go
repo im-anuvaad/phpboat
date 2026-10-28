@@ -228,7 +228,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	data := map[string]any{"Apps": rows, "Host": hostinfo.Read(s.Layout.Root), "Warnings": s.warnings(r, rows)}
+	data := map[string]any{"Apps": rows, "Host": hostinfo.Read(s.Layout.Root), "PHP": s.phpInfo(), "Warnings": s.warnings(r, rows)}
 	s.render(w, r, http.StatusOK, "home", "Apps", "apps", data)
 }
 
