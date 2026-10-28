@@ -44,11 +44,11 @@ func (s *Service) Restore(ctx context.Context, app string, id int64, lg *logs.Lo
 	if !b.Restorable() {
 		return res, fmt.Errorf("backup #%d cannot be restored (status %s, no copy available)", id, b.Status)
 	}
-	release, err := s.Hooks.Reserve(app)
+	unlock, err := s.Hooks.Reserve(app)
 	if err != nil {
 		return res, err
 	}
-	defer release()
+	defer unlock()
 
 	// 1. Fetch and verify, while the app keeps running.
 	work, err := os.MkdirTemp(s.stagingDir(), "restore-"+app+"-")

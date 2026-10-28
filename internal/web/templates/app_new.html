@@ -5,9 +5,16 @@
   {{with .Data.In}}
   <form method="post" action="/apps" class="grid">
     {{template "csrf" $.CSRF}}
-    <label class="wide">GitHub repository <input name="repo" value="{{.Repo}}" required placeholder="https://github.com/you/blog" list="repos">
-      <small>The app is named after the repository (e.g. <code>my_blog</code> becomes <code>my-blog</code>). It is deployed from the repository's GitHub releases, which its release workflow publishes (<a href="https://github.com/im-anuvaad/phpboat/blob/main/docs/app-contract.md" target="_blank" rel="noopener">app contract</a>).</small></label>
+    <label class="wide">GitHub repository <input name="repo" id="repo-input" value="{{.Repo}}" required placeholder="https://github.com/you/blog" list="repos">
+      <small>The app is named after the repository (e.g. <code>my_blog</code> becomes <code>my-blog</code>). Each deploy builds one commit of its branch: the source is fetched from GitHub and its phpboat.toml is read (<a href="https://github.com/im-anuvaad/phpboat/blob/main/docs/app-contract.md" target="_blank" rel="noopener">app contract</a>).</small></label>
     {{with $.Data.Repos}}<datalist id="repos">{{range .}}<option value="https://github.com/{{.FullName}}">{{end}}</datalist>{{end}}
+    <label class="wide">Branch
+      <select name="branch" data-branch-source="#repo-input" data-branch-note="branch-note">
+        <option value="" {{if eq .Branch ""}}selected{{end}}>the repository's default branch</option>
+        {{with .Branch}}<option value="{{.}}" selected>{{.}}</option>{{end}}
+      </select>
+      <small id="branch-note">Its commits are deployed. The branches list fills in once the repository is entered.</small>
+    </label>
     <label class="wide">Domain <input name="domain" value="{{.Domain}}" placeholder="blog.example.com"><small>DNS record and certificate are created in Cloudflare</small></label>
     {{if $.Data.BucketSet}}
     <label class="wide">Start with data from

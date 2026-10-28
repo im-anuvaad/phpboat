@@ -20,14 +20,19 @@ func TestTemplatesRender(t *testing.T) {
 	if err := s.parseTemplates(); err != nil {
 		t.Fatal(err)
 	}
-	row := AppRow{App: apps.App{Name: "web", Repo: "https://github.com/me/web", Domain: "web.example.com", Concurrency: 4}}
-	rel := github.Release{Tag: "v2", Name: "Two", PublishedAt: time.Now()}
+	row := AppRow{App: apps.App{Name: "web", Repo: "https://github.com/me/web", Branch: "main", Domain: "web.example.com", Concurrency: 4}}
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	current := deployer.Build{App: "web", ID: sha[:12], CommitSHA: sha, Subject: "One", Current: true}
+	commits := []commitView{
+		{Commit: github.Commit{SHA: "fedcba9876543210fedcba9876543210fedcba98", Subject: "Two", Author: "Ann", CreatedAt: time.Now()}},
+		{Commit: github.Commit{SHA: sha, Subject: "One", Author: "Ann", CreatedAt: time.Now()}, Deployed: true},
+	}
 	pages := map[string]any{
 		"home": map[string]any{"Apps": []AppRow{row}, "Host": hostinfo.Read(t.TempDir()), "Warnings": []string{"w"}},
 		"app": map[string]any{"App": &row, "Range": "1h", "Ranges": []string{"1h"},
-			"Releases":       []deployer.Release{{App: "web", ID: "v1", Subject: "One", SHA256: "0123456789abcdef", Current: true}},
-			"GitHubReleases": []github.Release{rel, {Tag: "v1", Prerelease: true}},
-			"Edit":           apps.Input{Repo: row.Repo}, "EdgeHost": edge.HostStatus{Host: "web.example.com"}},
+			"Current": current, "Builds": []deployer.Build{current},
+			"Commits": commits, "Behind": commitStatus(nil, sha),
+			"Edit": apps.Input{Repo: row.Repo, Branch: "main"}, "EdgeHost": edge.HostStatus{Host: "web.example.com"}},
 		"app_new":  map[string]any{"In": apps.Input{RestoreFrom: apps.AutoFolder}, "BucketSet": true, "Folders": []string{"web"}},
 		"settings": map[string]any{"Edge": edge.Status{Dashboard: "d.example.com", TokenSet: true}, "Policy": "every 3h"},
 	}
@@ -37,9 +42,9 @@ func TestTemplatesRender(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// No releases yet: the page explains how to publish one.
+	// No commits yet: the page says so.
 	var b bytes.Buffer
-	if err := s.pages["app"].ExecuteTemplate(&b, "layout", Page{Data: map[string]any{"App": &row}}); err != nil || !bytes.Contains(b.Bytes(), []byte("git tag v1.0.0")) {
-		t.Errorf("app without releases: %v", err)
+	if err := s.pages["app"].ExecuteTemplate(&b, "layout", Page{Data: map[string]any{"App": &row}}); err != nil || !bytes.Contains(b.Bytes(), []byte("The branch has no commits yet")) {
+		t.Errorf("app without commits: %v", err)
 	}
 }

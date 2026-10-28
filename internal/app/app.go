@@ -33,14 +33,18 @@ type Limits struct {
 }
 
 // Spec is everything the supervisor needs to run one app: an FPM pool
-// for the deployed release, behind phpserve.
+// for the deployed build, behind phpserve.
 type Spec struct {
-	Name        string
-	Domain      string
-	ReleaseID   string
-	ReleaseDir  string            // the deployed release (absolute)
-	Docroot     string            // public folder relative to ReleaseDir ("public", ".")
-	HealthPath  string            // GET through FastCGI must answer 2xx/3xx
+	Name       string
+	Domain     string
+	BuildID    string // the deployed build ("" = never deployed)
+	CommitSHA  string // full SHA of the commit the build was made from
+	BuildDir   string // the deployed build (absolute, read-only)
+	Docroot    string // public folder relative to BuildDir ("public", ".")
+	HealthPath string // GET through FastCGI must answer 2xx/3xx
+	// BeforeStart are PHP scripts (relative to BuildDir) run in order before
+	// every start of the app (docs/app-contract.md §8).
+	BeforeStart []string
 	PHP         map[string]string // the [php] settings of phpboat.toml (validated by the manifest)
 	Concurrency int               // PHP workers
 	Env         map[string]string // user env vars (reserved names rejected)
@@ -99,13 +103,18 @@ func (s *Spec) Validate() error {
 	if err := ValidateName(s.Name); err != nil {
 		errs = append(errs, err)
 	}
-	// An app without a release (never deployed) has no release dir yet.
-	if s.ReleaseID != "" {
-		if !strings.HasPrefix(s.ReleaseDir, "/") {
-			errs = append(errs, fmt.Errorf("app %q: release dir must be an absolute path", s.Name))
+	// An app without a build (never deployed) has no build dir yet.
+	if s.BuildID != "" {
+		if !strings.HasPrefix(s.BuildDir, "/") {
+			errs = append(errs, fmt.Errorf("app %q: build dir must be an absolute path", s.Name))
 		}
 		if s.Docroot == "" || strings.HasPrefix(s.Docroot, "/") || s.Docroot == ".." || strings.HasPrefix(s.Docroot, "../") {
-			errs = append(errs, fmt.Errorf("app %q: docroot %q must be a folder inside the release", s.Name, s.Docroot))
+			errs = append(errs, fmt.Errorf("app %q: docroot %q must be a folder inside the build", s.Name, s.Docroot))
+		}
+		for _, b := range s.BeforeStart {
+			if !strings.HasSuffix(b, ".php") || strings.HasPrefix(b, "/") || strings.Contains(b, "..") {
+				errs = append(errs, fmt.Errorf("app %q: before_start %q must be a .php file inside the build", s.Name, b))
+			}
 		}
 	}
 	if s.Concurrency == 0 {

@@ -25,12 +25,8 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
 
-// Port range for app listeners.
-const (
-	firstPort = 20001
-	lastPort  = 20999
-	maxApps   = 20
-)
+// maxApps is how many apps one host runs.
+const maxApps = 20
 
 // Edge is the part of the edge manager the registry uses (nil = no edge).
 type Edge interface {
@@ -44,8 +40,8 @@ type Edge interface {
 type App struct {
 	Name        string
 	Repo        string // https://github.com/<owner>/<repo>
+	Branch      string // the branch whose commits are deployed
 	Domain      string
-	Port        int // unused since phase 3 (FPM listens on a socket); dropped by phase 4's squashed schema
 	Concurrency int // PHP workers
 	Limits      app.Limits
 	CreatedAt   time.Time
@@ -56,9 +52,9 @@ type App struct {
 // fields mean "default" on create; edits send every field. The name is
 // never entered: it is derived from the repository name.
 type Input struct {
-	Repo, Domain      string
-	Memory, CPU, Pids string
-	Workers           string // PHP workers ("" = default on create)
+	Repo, Branch, Domain string
+	Memory, CPU, Pids    string
+	Workers              string // PHP workers ("" = default on create)
 	// RestoreFrom (create only) is a bucket folder whose newest backup is
 	// restored into the new app ("" = start empty, AutoFolder = the folder
 	// named like the app, if there is one).
@@ -127,14 +123,12 @@ func (s *Service) Load(ctx context.Context) error {
 	return nil
 }
 
-// The type, branch, path, build_memory and build_timeout columns belong to
-// removed features and are left at fixed values.
-const appCols = `name, repo, domain, port, memory_max, cpu_max, pids_max, created_at, concurrency`
+const appCols = `name, repo, branch, domain, memory_max, cpu_max, pids_max, created_at, concurrency`
 
 func scanApp(r interface{ Scan(...any) error }) (App, error) {
 	var a App
 	var created int64
-	err := r.Scan(&a.Name, &a.Repo, &a.Domain, &a.Port, &a.Limits.MemoryMax, &a.Limits.CPUMax, &a.Limits.PidsMax, &created, &a.Concurrency)
+	err := r.Scan(&a.Name, &a.Repo, &a.Branch, &a.Domain, &a.Limits.MemoryMax, &a.Limits.CPUMax, &a.Limits.PidsMax, &created, &a.Concurrency)
 	a.CreatedAt = time.Unix(created, 0)
 	return a, err
 }
@@ -215,7 +209,8 @@ func (s *Service) config(ctx context.Context, a App) (deployer.AppConfig, error)
 			Name: a.Name, Domain: a.Domain, Concurrency: a.Concurrency,
 			HealthPath: app.DefaultHealthPath, Env: env, Limits: a.Limits,
 		},
-		Repo: repo,
+		Repo:   repo,
+		Branch: a.Branch,
 	}, nil
 }
 
@@ -239,6 +234,17 @@ func (s *Service) validate(ctx context.Context, in Input, existing *App) (App, e
 			a.Name = name
 		case name != existing.Name:
 			errs = append(errs, fmt.Errorf("the app is named after its repository, so it can only move to a repository named %q", existing.Name))
+		}
+	}
+	if err == nil {
+		// A new app with no branch gets the repository's default branch;
+		// an edit with no branch keeps the current one.
+		branch := strings.TrimSpace(in.Branch)
+		if branch == "" && existing != nil {
+			branch = existing.Branch
+		}
+		if a.Branch, err = s.resolveBranch(ctx, repo, branch); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	a.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
@@ -299,28 +305,33 @@ func (s *Service) validate(ctx context.Context, in Input, existing *App) (App, e
 	return a, errors.Join(errs...)
 }
 
-// freePort picks a value for the legacy apps.port column (UNIQUE NOT NULL
-// in the pre-phase-4 schema); nothing listens on it.
-func (s *Service) freePort(ctx context.Context) (int, error) {
-	used := map[int]bool{}
-	rows, err := s.db.Reader().QueryContext(ctx, `SELECT port FROM apps`)
+// resolveBranch returns the branch name to deploy: the repository's default
+// branch when branch is "", and branch itself if GitHub has it.
+func (s *Service) resolveBranch(ctx context.Context, repo github.Repo, branch string) (string, error) {
+	token, err := s.dep.GitHubToken(ctx)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var p int
-		if err := rows.Scan(&p); err != nil {
-			return 0, err
+	api := &github.API{Token: token}
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if branch == "" {
+		info, err := api.Repository(cctx, repo)
+		if err != nil {
+			return "", fmt.Errorf("repository %s: %w", repo, err)
 		}
-		used[p] = true
-	}
-	for p := firstPort; p <= lastPort; p++ {
-		if !used[p] {
-			return p, nil
+		if info.DefaultBranch == "" {
+			return "", fmt.Errorf("repository %s has no default branch", repo)
 		}
+		return info.DefaultBranch, nil
 	}
-	return 0, errors.New("no free port")
+	if _, err := api.BranchHead(cctx, repo, branch); err != nil {
+		if errors.Is(err, github.ErrNotFound) {
+			return "", fmt.Errorf("branch %q not found in %s (for a private repository, set a GitHub token in Settings)", branch, repo)
+		}
+		return "", fmt.Errorf("branch %q of %s: %w", branch, repo, err)
+	}
+	return branch, nil
 }
 
 // Created is the result of Create.
@@ -380,13 +391,10 @@ func (s *Service) create(ctx context.Context, in Input) (App, error) {
 	if err != nil {
 		return a, err
 	}
-	if a.Port, err = s.freePort(ctx); err != nil {
-		return a, err
-	}
 	a.CreatedAt = time.Now()
-	if _, err := s.db.Writer().ExecContext(ctx, `INSERT INTO apps (`+appCols+`, type, branch, build_memory, build_timeout)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'release', '', 0, 0)`,
-		a.Name, a.Repo, a.Domain, a.Port, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.CreatedAt.Unix(), a.Concurrency); err != nil {
+	if _, err := s.db.Writer().ExecContext(ctx, `INSERT INTO apps (`+appCols+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.Repo, a.Branch, a.Domain, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.CreatedAt.Unix(), a.Concurrency); err != nil {
 		return a, fmt.Errorf("save app: %w", err)
 	}
 	cfg, err := s.config(ctx, a)
@@ -415,9 +423,9 @@ func (s *Service) Update(ctx context.Context, name string, in Input) (App, error
 	if err != nil {
 		return a, err
 	}
-	if _, err := s.db.Writer().ExecContext(ctx, `UPDATE apps SET repo = ?, domain = ?, memory_max = ?,
-		cpu_max = ?, pids_max = ?, concurrency = ?, type = 'release', branch = '' WHERE name = ?`,
-		a.Repo, a.Domain, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.Concurrency, name); err != nil {
+	if _, err := s.db.Writer().ExecContext(ctx, `UPDATE apps SET repo = ?, branch = ?, domain = ?, memory_max = ?,
+		cpu_max = ?, pids_max = ?, concurrency = ? WHERE name = ?`,
+		a.Repo, a.Branch, a.Domain, a.Limits.MemoryMax, a.Limits.CPUMax, a.Limits.PidsMax, a.Concurrency, name); err != nil {
 		return a, err
 	}
 	if err := s.pushConfig(ctx, a); err != nil {
@@ -489,7 +497,7 @@ type DeleteResult struct {
 }
 
 // Delete stops and removes an app: process, cgroup, user,
-// releases, logs, caches, routing, DNS record and certificate. DATA_DIR is
+// builds, logs, caches, routing, DNS record and certificate. DATA_DIR is
 // moved aside if keepData is set, otherwise deleted. Backups are kept
 // unless deleteBackups is set.
 func (s *Service) Delete(ctx context.Context, name string, keepData, deleteBackups bool) (DeleteResult, error) {

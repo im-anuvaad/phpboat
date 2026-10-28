@@ -1,6 +1,6 @@
 // Package github is a minimal GitHub REST client: token validation, repo
-// listing, and the releases an app is deployed from (docs/architecture.md
-// §7). The personal access token is only sent to the API host.
+// listing, branches and commits, and the source tarball of a commit. The
+// personal access token is only sent to the API host.
 package github
 
 import (
@@ -80,12 +80,11 @@ type RepoInfo struct {
 var ErrNotFound = errors.New("not found")
 
 func (a *API) do(ctx context.Context, path string, out any) (http.Header, error) {
-	base := a.base()
 	c := a.HTTP
 	if c == nil {
 		c = &http.Client{Timeout: 20 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.base()+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -145,78 +144,114 @@ func (a *API) Repos(ctx context.Context) ([]RepoInfo, error) {
 	return all, nil
 }
 
-// Release is a published GitHub release.
-type Release struct {
-	ID          int64     `json:"id"`
-	Tag         string    `json:"tag_name"`
-	Name        string    `json:"name"`
-	Draft       bool      `json:"draft"`
-	Prerelease  bool      `json:"prerelease"`
-	PublishedAt time.Time `json:"published_at"`
-	Assets      []Asset   `json:"assets"`
-}
-
-// Asset is a file attached to a release.
-type Asset struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-}
-
-// Asset returns the asset called name.
-func (r Release) Asset(name string) (Asset, bool) {
-	for _, a := range r.Assets {
-		if a.Name == name {
-			return a, true
-		}
-	}
-	return Asset{}, false
-}
-
 func repoPath(r Repo) string {
 	return "/repos/" + url.PathEscape(r.Owner) + "/" + url.PathEscape(r.Name)
 }
 
-// Releases returns up to n published releases of r, newest first (drafts
-// are skipped).
-func (a *API) Releases(ctx context.Context, r Repo, n int) ([]Release, error) {
-	var all []Release
-	if _, err := a.do(ctx, fmt.Sprintf("%s/releases?per_page=%d", repoPath(r), min(max(n, 1)+5, 100)), &all); err != nil {
+// Repository returns the repository's information, including its default
+// branch.
+func (a *API) Repository(ctx context.Context, r Repo) (RepoInfo, error) {
+	var info RepoInfo
+	_, err := a.do(ctx, repoPath(r), &info)
+	return info, err
+}
+
+// Branches returns the names of up to 100 branches of r.
+func (a *API) Branches(ctx context.Context, r Repo) ([]string, error) {
+	var bs []struct {
+		Name string `json:"name"`
+	}
+	if _, err := a.do(ctx, repoPath(r)+"/branches?per_page=100", &bs); err != nil {
 		return nil, err
 	}
-	var out []Release
-	for _, rel := range all {
-		if !rel.Draft && len(out) < n {
-			out = append(out, rel)
-		}
+	out := make([]string, 0, len(bs))
+	for _, b := range bs {
+		out = append(out, b.Name)
 	}
 	return out, nil
 }
 
-// ReleaseByTag returns the release with the given tag.
-func (a *API) ReleaseByTag(ctx context.Context, r Repo, tag string) (Release, error) {
-	var rel Release
-	if _, err := a.do(ctx, repoPath(r)+"/releases/tags/"+url.PathEscape(tag), &rel); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return rel, fmt.Errorf("%s has no release %s (for a private repository, set a GitHub token with Contents: Read-only in Settings)", r, tag)
-		}
-		return rel, err
+// BranchHead returns the SHA of the commit that branch points to. Branch
+// names may contain slashes; each part is escaped on its own.
+func (a *API) BranchHead(ctx context.Context, r Repo, branch string) (string, error) {
+	parts := strings.Split(branch, "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
 	}
-	if rel.Draft {
-		return rel, fmt.Errorf("release %s of %s is a draft", tag, r)
+	var b struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
 	}
-	return rel, nil
+	if _, err := a.do(ctx, repoPath(r)+"/branches/"+strings.Join(parts, "/"), &b); err != nil {
+		return "", err
+	}
+	return b.Commit.SHA, nil
 }
 
-// Download writes release asset id of r to path (at most max bytes). The
-// asset API redirects to a short-lived signed URL on another host; the
-// token is not forwarded there.
-func (a *API) Download(ctx context.Context, r Repo, id int64, path string, max int64) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s%s/releases/assets/%d", a.base(), repoPath(r), id), nil)
+// Commit is one commit of a repository.
+type Commit struct {
+	SHA       string    `json:"sha"`
+	Subject   string    `json:"subject"` // first line of the message
+	Author    string    `json:"author"`
+	CreatedAt time.Time `json:"date"`
+}
+
+type rawCommit struct {
+	SHA    string `json:"sha"`
+	Commit struct {
+		Message string `json:"message"`
+		Author  struct {
+			Name string    `json:"name"`
+			Date time.Time `json:"date"`
+		} `json:"author"`
+	} `json:"commit"`
+}
+
+func (c rawCommit) commit() Commit {
+	subject, _, _ := strings.Cut(c.Commit.Message, "\n")
+	return Commit{SHA: c.SHA, Subject: strings.TrimSpace(subject), Author: c.Commit.Author.Name, CreatedAt: c.Commit.Author.Date}
+}
+
+// Commits returns up to n commits of branch, newest first.
+func (a *API) Commits(ctx context.Context, r Repo, branch string, n int) ([]Commit, error) {
+	var raw []rawCommit
+	if _, err := a.do(ctx, fmt.Sprintf("%s/commits?sha=%s&per_page=%d", repoPath(r), url.QueryEscape(branch), min(max(n, 1), 100)), &raw); err != nil {
+		return nil, err
+	}
+	out := make([]Commit, 0, len(raw))
+	for _, c := range raw {
+		out = append(out, c.commit())
+	}
+	return out, nil
+}
+
+// Commit returns the commit that ref (a full SHA or a branch name) points to.
+func (a *API) Commit(ctx context.Context, r Repo, ref string) (Commit, error) {
+	var raw rawCommit
+	if _, err := a.do(ctx, repoPath(r)+"/commits/"+url.PathEscape(ref), &raw); err != nil {
+		return Commit{}, err
+	}
+	return raw.commit(), nil
+}
+
+// Tarball writes the source archive of commit sha of r to path (at most max
+// bytes). GitHub answers with a redirect to a signed URL on another host;
+// the token is never sent there.
+func (a *API) Tarball(ctx context.Context, r Repo, sha, path string, max int64) error {
+	return a.fetch(ctx, a.base()+repoPath(r)+"/tarball/"+url.PathEscape(sha), "", path, max, "source of "+sha)
+}
+
+// fetch downloads u into path (at most max bytes), refusing to leave a
+// partial file behind.
+func (a *API) fetch(ctx context.Context, u, accept, path string, max int64, what string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/octet-stream")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if a.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.Token)
@@ -242,7 +277,7 @@ func (a *API) Download(ctx context.Context, r Repo, id int64, path string, max i
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("github: download asset %d: HTTP %d", id, resp.StatusCode)
+		return fmt.Errorf("github: download %s: HTTP %d", what, resp.StatusCode)
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -253,7 +288,7 @@ func (a *API) Download(ctx context.Context, r Repo, id int64, path string, max i
 		err = cerr
 	}
 	if err == nil && n > max {
-		err = fmt.Errorf("asset is larger than %d MB", max>>20)
+		err = fmt.Errorf("the source is larger than %d MB", max>>20)
 	}
 	if err != nil {
 		os.Remove(path)

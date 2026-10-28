@@ -1,6 +1,6 @@
 # phpboat Status API
 
-> Carried over from binboat unchanged. Release fields become build/commit fields and a PHP version is added in phases 4 and 7 of [plan.md](plan.md).
+> Build and commit fields since phase 4 of [plan.md](plan.md). A PHP version field follows in phase 7.
 
 A small **read-only** JSON API for scripts and AI agents: "is my blog up?", "why is the shop unhealthy?", "when was the last backup?". It can't deploy, stop, restart or change anything; that stays in the dashboard.
 
@@ -21,7 +21,7 @@ There is one token at a time. **Rotate token** creates a new one and the old one
 - The API answers only on the dashboard domain, through Cloudflare, behind the same IP filter and origin pulls as the dashboard. It never answers on the server's IP (setup) address.
 - The dashboard's session cookie is **not** accepted: only the bearer token.
 - Wrong tokens count towards the sign-in rate limit: 5 failures from one IP in 15 minutes block that IP for both sign-in and the API (`429`), even with the right token.
-- Treat the token like a password. It can read app names, domains, repositories, release tags and error messages, but never env var values, other tokens or app data.
+- Treat the token like a password. It can read app names, domains, repositories, branches, commit SHAs and error messages, but never env var values, other tokens or app data.
 
 ## Endpoints
 
@@ -63,7 +63,8 @@ For an agent, `status` answers almost everything in one call; use `apps/{name}` 
       "healthy": true,
       "domain": "blog.example.com",
       "url": "https://blog.example.com/",
-      "release": "v1.0.0",
+      "build": "3f9c2a71b0de",
+      "commit": "3f9c2a71b0de0c6e1f0d7a5b2c8e9d4f6a1b2c3d",
       "deploying": false,
       "needs_restart": false,
       "memory_bytes": 31457280,
@@ -86,7 +87,8 @@ For an agent, `status` answers almost everything in one call; use `apps/{name}` 
 |---|---|
 | `state` | `running`, `starting`, `stopping`, `stopped`, `backoff` (restarting after a crash), `crashed` (gave up after 5 crashes in 5 minutes; needs **Start** in the dashboard), `unknown` (failed to load; see the server log) |
 | `healthy` | `true` when running and passing its health check, or stopped on purpose. `false` when crashed, restarting, starting, stopped although it should run, or never deployed |
-| `release` | The deployed release tag; `""` if never deployed |
+| `build` | The deployed build: the first 12 hex digits of its commit; `""` if never deployed |
+| `commit` | The full SHA of the deployed commit; `""` if never deployed |
 | `deploying` | A deployment is queued or running |
 | `needs_restart` | Env vars or limits changed and apply on the next restart |
 | `memory_bytes` / `memory_limit_bytes` | Current memory use and the limit at which the app is killed |
@@ -126,12 +128,12 @@ Everything above, plus:
     "disk_write_bytes_per_second": 0
   },
   "last_deployment": {
-    "id": 12, "kind": "deploy", "status": "succeeded", "release": "v1.0.0",
+    "id": 12, "kind": "deploy", "status": "succeeded", "build": "3f9c2a71b0de", "commit": "3f9c2a71b0de0c6e1f0d7a5b2c8e9d4f6a1b2c3d",
     "started_at": "2026-10-11T09:12:00Z", "finished_at": "2026-10-11T09:12:04Z", "error": ""
   },
   "last_backup": {
     "id": 88, "kind": "scheduled", "status": "ok", "created_at": "2026-10-12T15:00:04Z",
-    "size_bytes": 482133, "in_bucket": true, "on_server": true, "release": "v1.0.0", "error": ""
+    "size_bytes": 482133, "in_bucket": true, "on_server": true, "build": "3f9c2a71b0de", "error": ""
   },
   "domain_status": { "dns": "ok", "certificate_valid_until": "2041-10-01T00:00:00Z", "error": "" },
   "warnings": ["crashed and not being restarted: exit status 1"]

@@ -134,7 +134,7 @@ func (s *Supervisor) Apps() []*App {
 }
 
 // StartAll starts apps one at a time, waiting for each to
-// become healthy or fail before starting the next. Apps without a release
+// become healthy or fail before starting the next. Apps without a build
 // and apps for which want returns false are skipped. Failures are logged;
 // failed apps keep retrying under the restart policy.
 func (s *Supervisor) StartAll(ctx context.Context, want func(name string) bool) {
@@ -142,7 +142,7 @@ func (s *Supervisor) StartAll(ctx context.Context, want func(name string) bool) 
 		if ctx.Err() != nil {
 			return
 		}
-		if a.Spec().ReleaseID == "" {
+		if a.Spec().BuildID == "" {
 			s.deps.Log.Info("app not started: never deployed", "app", a.Spec().Name)
 			continue
 		}

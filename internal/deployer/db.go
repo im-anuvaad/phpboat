@@ -14,16 +14,17 @@ import (
 // Deployment statuses.
 const (
 	StatusQueued    = "queued"
-	StatusPreparing = "preparing" // downloading, verifying and unpacking the release
-	StatusDeploying = "deploying"
+	StatusPreparing = "preparing" // fetching the commit, Composer, the build; the old build still serves
+	StatusDeploying = "deploying" // the downtime window: stop, backup, switch, start
 	StatusSucceeded = "succeeded"
 	StatusFailed    = "failed"
 )
 
 // Deployment kinds.
 const (
-	KindDeploy   = "deploy"
-	KindRollback = "rollback"
+	KindDeploy   = "deploy"   // a commit of the app's branch
+	KindRebuild  = "rebuild"  // the deployed commit again, source and Composer included
+	KindRollback = "rollback" // a kept build, switched to without a download
 )
 
 // Deployment is one row of the deploy history.
@@ -32,8 +33,8 @@ type Deployment struct {
 	App        string    `json:"app"`
 	Kind       string    `json:"kind"`
 	Status     string    `json:"status"`
-	ReleaseID  string    `json:"release_id"`
-	GitSHA     string    `json:"git_sha"`
+	BuildID    string    `json:"build_id"`
+	CommitSHA  string    `json:"commit_sha"`
 	Error      string    `json:"error"`
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  time.Time `json:"started_at"`
@@ -43,15 +44,18 @@ type Deployment struct {
 // Done reports whether the deployment has finished.
 func (d Deployment) Done() bool { return d.Status == StatusSucceeded || d.Status == StatusFailed }
 
-// Release is a GitHub release unpacked on the server (at most KeepReleases).
-type Release struct {
-	App       string            `json:"app"`
-	ID        string            `json:"id"`      // the tag
-	Subject   string            `json:"subject"` // the release name
-	SHA256    string            `json:"sha256"`  // of the tarball
-	Manifest  manifest.Manifest `json:"manifest"`
-	CreatedAt time.Time         `json:"created_at"`
-	Current   bool              `json:"current"`
+// Build is a prepared build kept on the server (at most KeepBuilds per app).
+type Build struct {
+	App         string            `json:"app"`
+	ID          string            `json:"id"` // the first 12 hex digits of CommitSHA
+	CommitSHA   string            `json:"commit_sha"`
+	Subject     string            `json:"subject"` // first line of the commit message
+	Author      string            `json:"author"`
+	CommittedAt time.Time         `json:"committed_at"`
+	SHA256      string            `json:"sha256"` // of the source archive
+	Manifest    manifest.Manifest `json:"manifest"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Current     bool              `json:"current"`
 }
 
 func unix(t time.Time) int64 {
@@ -68,20 +72,20 @@ func fromUnix(n int64) time.Time {
 	return time.Unix(n, 0).UTC()
 }
 
-const deploymentCols = `id, app, kind, status, release_id, git_sha, error, created_at, started_at, finished_at`
+const deploymentCols = `id, app, kind, status, build_id, commit_sha, error, created_at, started_at, finished_at`
 
 func scanDeployment(s interface{ Scan(...any) error }) (Deployment, error) {
 	var d Deployment
 	var c, st, f int64
-	err := s.Scan(&d.ID, &d.App, &d.Kind, &d.Status, &d.ReleaseID, &d.GitSHA, &d.Error, &c, &st, &f)
+	err := s.Scan(&d.ID, &d.App, &d.Kind, &d.Status, &d.BuildID, &d.CommitSHA, &d.Error, &c, &st, &f)
 	d.CreatedAt, d.StartedAt, d.FinishedAt = fromUnix(c), fromUnix(st), fromUnix(f)
 	return d, err
 }
 
-func (d *Deployer) insertDeployment(ctx context.Context, app, kind, releaseID string) (int64, error) {
+func (d *Deployer) insertDeployment(ctx context.Context, app, kind, buildID, commit string) (int64, error) {
 	res, err := d.db.Writer().ExecContext(ctx,
-		`INSERT INTO deployments (app, kind, status, release_id, created_at) VALUES (?, ?, ?, ?, ?)`,
-		app, kind, StatusQueued, releaseID, time.Now().Unix())
+		`INSERT INTO deployments (app, kind, status, build_id, commit_sha, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		app, kind, StatusQueued, buildID, commit, time.Now().Unix())
 	if err != nil {
 		return 0, fmt.Errorf("deployer: record deployment: %w", err)
 	}
@@ -89,17 +93,19 @@ func (d *Deployer) insertDeployment(ctx context.Context, app, kind, releaseID st
 }
 
 func (d *Deployer) setStatus(id int64, status string) {
-	col := ""
+	var err error
 	if status == StatusPreparing {
-		col = ", started_at = " + fmt.Sprint(time.Now().Unix())
+		_, err = d.db.Writer().Exec(`UPDATE deployments SET status = ?, started_at = ? WHERE id = ?`, status, time.Now().Unix(), id)
+	} else {
+		_, err = d.db.Writer().Exec(`UPDATE deployments SET status = ? WHERE id = ?`, status, id)
 	}
-	if _, err := d.db.Writer().Exec(`UPDATE deployments SET status = ?`+col+` WHERE id = ?`, status, id); err != nil {
+	if err != nil {
 		d.log.Error("update deployment", "id", id, "err", err)
 	}
 }
 
-func (d *Deployer) setRelease(id int64, releaseID, sha string) {
-	if _, err := d.db.Writer().Exec(`UPDATE deployments SET release_id = ?, git_sha = ? WHERE id = ?`, releaseID, sha, id); err != nil {
+func (d *Deployer) setBuild(id int64, buildID, commit string) {
+	if _, err := d.db.Writer().Exec(`UPDATE deployments SET build_id = ?, commit_sha = ? WHERE id = ?`, buildID, commit, id); err != nil {
 		d.log.Error("update deployment", "id", id, "err", err)
 	}
 }
@@ -143,69 +149,72 @@ func (d *Deployer) Deployments(ctx context.Context, app string, limit int) ([]De
 	return out, rows.Err()
 }
 
-func (d *Deployer) insertRelease(ctx context.Context, r Release) error {
-	m, err := json.Marshal(r.Manifest)
+func (d *Deployer) upsertBuild(ctx context.Context, b Build) error {
+	m, err := json.Marshal(b.Manifest)
 	if err != nil {
 		return err
 	}
-	_, err = d.db.Writer().ExecContext(ctx, `INSERT INTO releases
-		(app, id, git_sha, subject, branch, subdir, zig_version, sha256, run, health_path, manifest, created_at)
-		VALUES (?, ?, '', ?, '', '', '', ?, '[]', ?, ?, ?)`,
-		r.App, r.ID, r.Subject, r.SHA256, r.Manifest.HealthPath, string(m), unix(r.CreatedAt))
+	_, err = d.db.Writer().ExecContext(ctx, `INSERT INTO builds
+		(app, id, commit_sha, subject, author, committed_at, sha256, manifest, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (app, id) DO UPDATE SET commit_sha = excluded.commit_sha, subject = excluded.subject,
+			author = excluded.author, committed_at = excluded.committed_at, sha256 = excluded.sha256,
+			manifest = excluded.manifest, created_at = excluded.created_at`,
+		b.App, b.ID, b.CommitSHA, b.Subject, b.Author, unix(b.CommittedAt), b.SHA256, string(m), unix(b.CreatedAt))
 	return err
 }
 
-func (d *Deployer) deleteRelease(app, id string) error {
-	_, err := d.db.Writer().Exec(`DELETE FROM releases WHERE app = ? AND id = ?`, app, id)
+func (d *Deployer) deleteBuild(ctx context.Context, app, id string) error {
+	_, err := d.db.Writer().ExecContext(ctx, `DELETE FROM builds WHERE app = ? AND id = ?`, app, id)
 	return err
 }
 
-// release loads one release row.
-func (d *Deployer) release(ctx context.Context, app, id string) (Release, error) {
-	rs, err := d.queryReleases(ctx, `WHERE app = ? AND id = ?`, app, id)
+// build loads one build row.
+func (d *Deployer) build(ctx context.Context, app, id string) (Build, error) {
+	bs, err := d.queryBuilds(ctx, `WHERE app = ? AND id = ?`, app, id)
 	if err != nil {
-		return Release{}, err
+		return Build{}, err
 	}
-	if len(rs) == 0 {
-		return Release{}, fmt.Errorf("release %s of %s not found (only the last 3 releases are kept)", id, app)
+	if len(bs) == 0 {
+		return Build{}, fmt.Errorf("build %s of %s not found (only the last %d builds are kept)", id, app, KeepBuilds)
 	}
-	return rs[0], nil
+	return bs[0], nil
 }
 
-// Releases lists the kept releases of app, newest first.
-func (d *Deployer) Releases(ctx context.Context, app string) ([]Release, error) {
-	rs, err := d.queryReleases(ctx, `WHERE app = ? ORDER BY created_at DESC, id DESC`, app)
+// Builds lists the kept builds of app, newest first.
+func (d *Deployer) Builds(ctx context.Context, app string) ([]Build, error) {
+	bs, err := d.queryBuilds(ctx, `WHERE app = ? ORDER BY created_at DESC, id DESC`, app)
 	if err != nil {
 		return nil, err
 	}
-	cur := d.currentRelease(app)
-	for i := range rs {
-		rs[i].Current = rs[i].ID == cur
+	cur := d.currentBuild(app)
+	for i := range bs {
+		bs[i].Current = bs[i].ID == cur
 	}
-	return rs, nil
+	return bs, nil
 }
 
-func (d *Deployer) queryReleases(ctx context.Context, where string, args ...any) ([]Release, error) {
-	rows, err := d.db.Reader().QueryContext(ctx, `SELECT app, id, subject, sha256, manifest, created_at
-		FROM releases `+where, args...)
+func (d *Deployer) queryBuilds(ctx context.Context, where string, args ...any) ([]Build, error) {
+	rows, err := d.db.Reader().QueryContext(ctx, `SELECT app, id, commit_sha, subject, author, committed_at, sha256, manifest, created_at
+		FROM builds `+where, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Release
+	var out []Build
 	for rows.Next() {
-		var r Release
+		var b Build
 		var m string
-		var created int64
-		if err := rows.Scan(&r.App, &r.ID, &r.Subject, &r.SHA256, &m, &created); err != nil {
+		var committed, created int64
+		if err := rows.Scan(&b.App, &b.ID, &b.CommitSHA, &b.Subject, &b.Author, &committed, &b.SHA256, &m, &created); err != nil {
 			return nil, err
 		}
-		r.Manifest = manifest.Default()
-		if err := json.Unmarshal([]byte(m), &r.Manifest); err != nil {
-			return nil, fmt.Errorf("release %s: bad manifest column: %w", r.ID, err)
+		b.Manifest = manifest.Default()
+		if err := json.Unmarshal([]byte(m), &b.Manifest); err != nil {
+			return nil, fmt.Errorf("build %s: bad manifest column: %w", b.ID, err)
 		}
-		r.CreatedAt = fromUnix(created)
-		out = append(out, r)
+		b.CommittedAt, b.CreatedAt = fromUnix(committed), fromUnix(created)
+		out = append(out, b)
 	}
 	return out, rows.Err()
 }
@@ -229,11 +238,11 @@ func (d *Deployer) SetDesired(ctx context.Context, app string, running bool) err
 	return err
 }
 
-// recover marks deployments interrupted by a phpboat restart as failed.
+// recoverInterrupted marks deployments interrupted by a phpboat restart as failed.
 func (d *Deployer) recoverInterrupted(ctx context.Context) (int64, error) {
 	res, err := d.db.Writer().ExecContext(ctx, `UPDATE deployments
 		SET status = ?, error = 'interrupted: phpboat restarted during this deployment', finished_at = ?
-		WHERE status IN (?, ?, ?, 'building')`, StatusFailed, time.Now().Unix(), StatusQueued, StatusPreparing, StatusDeploying)
+		WHERE status IN (?, ?, ?)`, StatusFailed, time.Now().Unix(), StatusQueued, StatusPreparing, StatusDeploying)
 	if err != nil {
 		return 0, err
 	}

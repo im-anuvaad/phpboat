@@ -140,7 +140,8 @@ type apiAppSummary struct {
 	Healthy      bool             `json:"healthy"`
 	Domain       string           `json:"domain"`
 	URL          string           `json:"url"`
-	Release      string           `json:"release"`
+	Build        string           `json:"build"`
+	Commit       string           `json:"commit"`
 	Deploying    bool             `json:"deploying"`
 	NeedsRestart bool             `json:"needs_restart"`
 	MemoryBytes  int64            `json:"memory_bytes"`
@@ -214,7 +215,8 @@ type apiDeployment struct {
 	ID         int64   `json:"id"`
 	Kind       string  `json:"kind"`
 	Status     string  `json:"status"`
-	Release    string  `json:"release"`
+	Build      string  `json:"build"`
+	Commit     string  `json:"commit"`
 	StartedAt  apiTime `json:"started_at"`
 	FinishedAt apiTime `json:"finished_at"`
 	Error      string  `json:"error"`
@@ -228,7 +230,7 @@ type apiBackup struct {
 	SizeBytes int64   `json:"size_bytes"`
 	InBucket  bool    `json:"in_bucket"`
 	OnServer  bool    `json:"on_server"`
-	Release   string  `json:"release"`
+	Build     string  `json:"build"`
 	Error     string  `json:"error"`
 }
 
@@ -248,7 +250,7 @@ func (s *Server) appHealthy(r *http.Request, row AppRow) bool {
 	case supervisor.Running:
 		return true
 	case supervisor.Stopped:
-		return row.Status.Release != "" && !s.Dep.DesiredRunning(r.Context(), row.Name)
+		return row.Status.Build != "" && !s.Dep.DesiredRunning(r.Context(), row.Name)
 	}
 	return false
 }
@@ -260,7 +262,7 @@ func (s *Server) apiSummaryOf(r *http.Request, row AppRow) apiAppSummary {
 	}
 	a := apiAppSummary{
 		Name: row.Name, State: state, Healthy: s.appHealthy(r, row),
-		Domain: row.Domain, Release: row.Status.Release, Deploying: row.Pending != 0,
+		Domain: row.Domain, Build: row.Status.Build, Commit: row.Commit, Deploying: row.Pending != 0,
 		NeedsRestart: row.NeedsRestart, MemoryBytes: row.MemBytes, MemoryLimit: row.Limits.MemoryMax,
 		Requests: row.Requests, Requests5xx: row.Requests5xx,
 		LastBackup: apiTime(row.LastBackup), BackupIssue: row.BackupProblem,
@@ -355,7 +357,7 @@ func (s *Server) apiApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if deps, err := s.Dep.Deployments(ctx, name, 1); err == nil && len(deps) > 0 {
 		x := deps[0]
-		d.Deployment = &apiDeployment{ID: x.ID, Kind: x.Kind, Status: x.Status, Release: x.ReleaseID,
+		d.Deployment = &apiDeployment{ID: x.ID, Kind: x.Kind, Status: x.Status, Build: x.BuildID, Commit: x.CommitSHA,
 			StartedAt: apiTime(x.StartedAt), FinishedAt: apiTime(x.FinishedAt), Error: x.Error}
 	}
 	if s.Backups != nil {
@@ -373,7 +375,7 @@ func (s *Server) apiApp(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case st.State == supervisor.Crashed:
 		d.Warnings = append(d.Warnings, "crashed and not being restarted: "+st.LastError)
-	case !d.Healthy && st.Release == "":
+	case !d.Healthy && st.Build == "":
 		d.Warnings = append(d.Warnings, "never deployed")
 	case !d.Healthy:
 		d.Warnings = append(d.Warnings, "not running although it should be (state "+string(st.State)+")")
@@ -398,7 +400,7 @@ func nowOf(p metrics.Point) *apiNow {
 
 func backupOf(b backup.Backup) *apiBackup {
 	return &apiBackup{ID: b.ID, Kind: b.Kind, Status: b.Status, CreatedAt: apiTime(b.CreatedAt), SizeBytes: b.Size,
-		InBucket: b.Uploaded(), OnServer: b.LocalPath != "", Release: b.ReleaseID, Error: b.Error}
+		InBucket: b.Uploaded(), OnServer: b.LocalPath != "", Build: b.BuildID, Error: b.Error}
 }
 
 func (s *Server) apiInternal(w http.ResponseWriter, err error) {

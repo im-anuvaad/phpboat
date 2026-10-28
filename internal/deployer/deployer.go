@@ -1,9 +1,10 @@
-// Package deployer implements the deploy pipeline: GitHub release →
-// download + checksum → safe unpack → phpboat.toml and docroot check →
-// stop old → pre-deploy backup → switch → start php-fpm + health check,
-// with automatic rollback when the new release is unhealthy. Until phase 4
-// (docs/plan.md §12) releases are still GitHub release tarballs; phase 4
-// fetches commits and runs composer instead.
+// Package deployer implements the deploy pipeline (docs/plan.md §5). A commit
+// of the app's branch is fetched as a source archive, checked against
+// phpboat.toml, and prepared into a build: Composer runs in its own cgroup,
+// and the result is read-only. The old build serves until the switch. The
+// switch stops the old build, backs up the data, links the persist folders,
+// starts the new build (its before_start scripts run first) and waits for it
+// to be healthy. If that fails, the previous build comes back.
 //
 // All deploys and rollbacks on the host run one at a time from a single
 // queue.
@@ -17,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,11 +25,11 @@ import (
 	"time"
 
 	"github.com/im-anuvaad/phpboat/internal/app"
-	"github.com/im-anuvaad/phpboat/internal/artifact"
+	"github.com/im-anuvaad/phpboat/internal/cgroup"
 	"github.com/im-anuvaad/phpboat/internal/github"
 	"github.com/im-anuvaad/phpboat/internal/layout"
 	"github.com/im-anuvaad/phpboat/internal/logs"
-	"github.com/im-anuvaad/phpboat/internal/manifest"
+	"github.com/im-anuvaad/phpboat/internal/php"
 	"github.com/im-anuvaad/phpboat/internal/secrets"
 	"github.com/im-anuvaad/phpboat/internal/store"
 	"github.com/im-anuvaad/phpboat/internal/supervisor"
@@ -38,7 +38,7 @@ import (
 
 // Retention.
 const (
-	KeepReleases  = 3
+	KeepBuilds    = 3
 	KeepBuildLogs = 20
 )
 
@@ -48,30 +48,45 @@ const (
 	purposeGitHubToken = "settings:github_token"
 )
 
-// Limits of a release download.
+// Limits and timeouts of a deploy.
 const (
-	maxAsset     = 1 << 30
-	maxChecksums = 64 << 10
-	releasesTTL  = time.Minute
-	// ListReleases is how many GitHub releases the app page offers.
-	ListReleases = 10
+	maxTarball      = 200 << 20 // the source archive of a commit (docs/plan.md §5)
+	commitsTTL      = time.Minute
+	ListCommits     = 10 // commits the app page offers
+	composeTimeout  = 10 * time.Minute
+	platformTimeout = time.Minute
+	// composeMemory is PHP's memory_limit for Composer. Its cgroup allows 256 MB.
+	composeMemory = "192M"
+	// activateTimeout bounds one switch: stop, backup, start, before_start
+	// scripts (each up to 5 min) and the health check.
+	activateTimeout = 15 * time.Minute
 )
+
+var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// ValidateCommit checks that s is a full commit SHA (lowercase hex).
+func ValidateCommit(s string) error {
+	if !shaRe.MatchString(s) {
+		return fmt.Errorf("%q is not a full commit SHA (40 lowercase hex digits)", s)
+	}
+	return nil
+}
+
+// BuildID names the build of a commit: the first 12 hex digits of its SHA.
+func BuildID(sha string) string { return sha[:12] }
+
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
 
 // AppConfig is the deploy configuration of one app.
 type AppConfig struct {
-	Base app.Spec // name, domain, concurrency, env, limits (no release fields)
-	Repo github.Repo
-}
-
-var tagRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-
-// ValidateTag checks that a release tag can be used as a release directory
-// name and as PHPBOAT_RELEASE.
-func ValidateTag(tag string) error {
-	if !tagRe.MatchString(tag) || strings.Contains(tag, "..") {
-		return fmt.Errorf("release tag %q is not supported: use letters, digits, '.', '_' and '-' (e.g. v1.0.0)", tag)
-	}
-	return nil
+	Base   app.Spec // name, domain, concurrency, env, limits (no build fields)
+	Repo   github.Repo
+	Branch string // the branch whose commits are deployed
 }
 
 // Deps are the deployer's collaborators.
@@ -80,10 +95,13 @@ type Deps struct {
 	Store      *store.Store
 	Secrets    *secrets.Box
 	Supervisor *supervisor.Supervisor
-	Log        *slog.Logger
-	// PreDeploy runs after the old release stopped and before the switch.
-	// Phase 5 plugs the SQLite backup in here. A returned error aborts the
-	// deploy and restarts the old release.
+	Cgroups    *cgroup.Manager
+	// PHP returns the host's PHP (Composer and before_start run with its CLI).
+	PHP func() (php.Runtime, error)
+	Log *slog.Logger
+	// PreDeploy runs after the old build stopped and before the switch.
+	// Phase 5 plugs the full-data backup in here. A returned error aborts the
+	// deploy and restarts the old build.
 	PreDeploy func(ctx context.Context, app string, log *logs.Log) error
 }
 
@@ -98,7 +116,7 @@ type Deployer struct {
 	pending   map[string]int64  // app -> queued or running deployment
 	held      map[string]string // app -> reason (e.g. a restore) that blocks deployments
 	deploying map[string]bool   // app is between "stop old" and "healthy/failed"
-	releases  map[string]cachedReleases
+	commits   map[string]cachedCommits
 
 	queue  chan job
 	ctx    context.Context
@@ -107,15 +125,15 @@ type Deployer struct {
 }
 
 type job struct {
-	id      int64
-	app     string
-	kind    string
-	release string // the tag to deploy, or the kept release to roll back to
+	id   int64
+	app  string
+	kind string
+	ref  string // a commit SHA (deploy, rebuild) or a build ID (rollback)
 }
 
-type cachedReleases struct {
+type cachedCommits struct {
 	at   time.Time
-	list []github.Release
+	list []github.Commit
 	err  error
 }
 
@@ -133,7 +151,7 @@ func New(ctx context.Context, d Deps) (*Deployer, error) {
 		pending:   map[string]int64{},
 		held:      map[string]string{},
 		deploying: map[string]bool{},
-		releases:  map[string]cachedReleases{},
+		commits:   map[string]cachedCommits{},
 		queue:     make(chan job, 64),
 	}
 	if n, err := dp.recoverInterrupted(ctx); err != nil {
@@ -144,26 +162,25 @@ func New(ctx context.Context, d Deps) (*Deployer, error) {
 	return dp, nil
 }
 
-// Register adds an app and its current release (if any) to the supervisor.
+// Register adds an app and its current build (if any) to the supervisor.
 func (d *Deployer) Register(ctx context.Context, cfg AppConfig) (*supervisor.App, error) {
 	spec := cfg.Base
-	if cur := d.currentRelease(spec.Name); cur != "" {
-		rel, err := d.release(ctx, spec.Name, cur)
+	d.recoverWork(spec.Name)
+	if cur := d.currentBuild(spec.Name); cur != "" {
+		b, err := d.build(ctx, spec.Name, cur)
 		if err != nil {
-			d.log.Warn("current release has no record; app needs a deploy", "app", spec.Name, "release", cur, "err", err)
+			d.log.Warn("current build has no record; app needs a deploy", "app", spec.Name, "build", cur, "err", err)
 		} else {
-			spec = d.specFor(cfg, rel)
+			spec = d.specFor(cfg, b)
 		}
 	}
 	a, err := d.Supervisor.Add(spec)
 	if err != nil {
 		return nil, err
 	}
-	for _, e := range []string{d.Layout.DownloadsDir(spec.Name)} {
-		entries, _ := os.ReadDir(e)
-		for _, x := range entries {
-			os.RemoveAll(filepath.Join(e, x.Name()))
-		}
+	entries, _ := os.ReadDir(d.Layout.DownloadsDir(spec.Name))
+	for _, x := range entries {
+		os.RemoveAll(filepath.Join(d.Layout.DownloadsDir(spec.Name), x.Name()))
 	}
 	d.mu.Lock()
 	d.apps[spec.Name] = cfg
@@ -171,18 +188,21 @@ func (d *Deployer) Register(ctx context.Context, cfg AppConfig) (*supervisor.App
 	return a, nil
 }
 
-func (d *Deployer) specFor(cfg AppConfig, r Release) app.Spec {
+// specFor is the supervisor spec of a build of the app.
+func (d *Deployer) specFor(cfg AppConfig, b Build) app.Spec {
 	s := cfg.Base
-	s.ReleaseID = r.ID
-	s.ReleaseDir = d.Layout.ReleaseDir(s.Name, r.ID)
-	s.Docroot = r.Manifest.Docroot
-	s.HealthPath = r.Manifest.HealthPath
-	s.PHP = r.Manifest.PHP
+	s.BuildID = b.ID
+	s.CommitSHA = b.CommitSHA
+	s.BuildDir = d.Layout.BuildDir(s.Name, b.ID)
+	s.Docroot = b.Manifest.Docroot
+	s.HealthPath = b.Manifest.HealthPath
+	s.PHP = b.Manifest.PHP
+	s.BeforeStart = b.Manifest.BeforeStart
 	return s
 }
 
-// currentRelease reads the `current` symlink ("" if none).
-func (d *Deployer) currentRelease(appName string) string {
+// currentBuild reads the `current` symlink ("" if none).
+func (d *Deployer) currentBuild(appName string) string {
 	t, err := os.Readlink(d.Layout.CurrentLink(appName))
 	if err != nil {
 		return ""
@@ -191,39 +211,54 @@ func (d *Deployer) currentRelease(appName string) string {
 }
 
 // Deploying reports whether app is in the downtime window of a deploy
-// (the router shows a 503 "deploying" page then; Phase 3).
+// (the router shows a 503 "deploying" page then).
 func (d *Deployer) Deploying(appName string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.deploying[appName]
 }
 
-// Deploy queues a deploy of the GitHub release tag.
-func (d *Deployer) Deploy(ctx context.Context, appName, tag string) (int64, error) {
-	tag = strings.TrimSpace(tag)
-	if tag == "" {
-		return 0, errors.New("choose a release to deploy")
+// Deploy queues a deploy of commit sha of the app's branch.
+func (d *Deployer) Deploy(ctx context.Context, appName, sha string) (int64, error) {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if sha == "" {
+		return 0, errors.New("choose a commit to deploy")
 	}
-	if err := ValidateTag(tag); err != nil {
+	if err := ValidateCommit(sha); err != nil {
 		return 0, err
 	}
-	if d.currentRelease(appName) == tag {
-		return 0, fmt.Errorf("release %s is already running (use Restart to restart it)", tag)
+	if d.currentBuild(appName) == BuildID(sha) {
+		return 0, fmt.Errorf("commit %s is already running (use Restart to restart it, or Rebuild to build it again)", short(sha))
 	}
-	return d.enqueue(ctx, appName, KindDeploy, tag)
+	return d.enqueue(ctx, appName, KindDeploy, sha)
 }
 
-// GitHubReleases lists the newest published releases of an app's
-// repository, cached for a minute (the app page refreshes every 5 s).
-func (d *Deployer) GitHubReleases(ctx context.Context, appName string) ([]github.Release, error) {
+// Rebuild queues a new build of the deployed commit: the source is fetched
+// again and Composer runs again (e.g. after a Composer outage or a changed
+// COMPOSER_AUTH).
+func (d *Deployer) Rebuild(ctx context.Context, appName string) (int64, error) {
+	cur := d.currentBuild(appName)
+	if cur == "" {
+		return 0, errors.New("nothing is deployed yet: deploy a commit first")
+	}
+	b, err := d.build(ctx, appName, cur)
+	if err != nil {
+		return 0, err
+	}
+	return d.enqueue(ctx, appName, KindRebuild, b.CommitSHA)
+}
+
+// GitHubCommits lists the newest commits of the app's branch, cached for a
+// minute (the app page refreshes every 5 s).
+func (d *Deployer) GitHubCommits(ctx context.Context, appName string) ([]github.Commit, error) {
 	d.mu.Lock()
 	cfg, ok := d.apps[appName]
-	c, cached := d.releases[appName]
+	c, cached := d.commits[appName]
 	d.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown app %q", appName)
 	}
-	if cached && time.Since(c.at) < releasesTTL {
+	if cached && time.Since(c.at) < commitsTTL {
 		return c.list, c.err
 	}
 	token, err := d.GitHubToken(ctx)
@@ -232,36 +267,39 @@ func (d *Deployer) GitHubReleases(ctx context.Context, appName string) ([]github
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	list, err := (&github.API{Token: token}).Releases(cctx, cfg.Repo, ListReleases)
+	list, err := (&github.API{Token: token}).Commits(cctx, cfg.Repo, cfg.Branch, ListCommits)
 	d.mu.Lock()
-	d.releases[appName] = cachedReleases{at: time.Now(), list: list, err: err}
+	d.commits[appName] = cachedCommits{at: time.Now(), list: list, err: err}
 	d.mu.Unlock()
 	return list, err
 }
 
-// ForgetReleases drops the cached release list of app ("" = every app).
-func (d *Deployer) ForgetReleases(appName string) {
+// ForgetCommits drops the cached commit lists of app ("" = every app).
+func (d *Deployer) ForgetCommits(appName string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if appName == "" {
-		d.releases = map[string]cachedReleases{}
+		d.commits = map[string]cachedCommits{}
 	} else {
-		delete(d.releases, appName)
+		delete(d.commits, appName)
 	}
 }
 
-// Rollback queues a switch to a kept release (no download).
-func (d *Deployer) Rollback(ctx context.Context, appName, releaseID string) (int64, error) {
-	if _, err := d.release(ctx, appName, releaseID); err != nil {
+// Rollback queues a switch to a kept build (no download).
+func (d *Deployer) Rollback(ctx context.Context, appName, buildID string) (int64, error) {
+	if buildID == "" {
+		return 0, errors.New("choose a build to roll back to")
+	}
+	if _, err := d.build(ctx, appName, buildID); err != nil {
 		return 0, err
 	}
-	if d.currentRelease(appName) == releaseID {
-		return 0, fmt.Errorf("release %s is already current", releaseID)
+	if d.currentBuild(appName) == buildID {
+		return 0, fmt.Errorf("build %s is already current", buildID)
 	}
-	return d.enqueue(ctx, appName, KindRollback, releaseID)
+	return d.enqueue(ctx, appName, KindRollback, buildID)
 }
 
-func (d *Deployer) enqueue(ctx context.Context, appName, kind, release string) (int64, error) {
+func (d *Deployer) enqueue(ctx context.Context, appName, kind, ref string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, ok := d.apps[appName]; !ok {
@@ -276,12 +314,20 @@ func (d *Deployer) enqueue(ctx context.Context, appName, kind, release string) (
 	if d.ctx == nil || d.ctx.Err() != nil {
 		return 0, errors.New("deployer is not running")
 	}
-	id, err := d.insertDeployment(ctx, appName, kind, release)
+	buildID, commit := BuildID(ref), ref
+	if kind == KindRollback {
+		b, err := d.build(ctx, appName, ref)
+		if err != nil {
+			return 0, err
+		}
+		buildID, commit = b.ID, b.CommitSHA
+	}
+	id, err := d.insertDeployment(ctx, appName, kind, buildID, commit)
 	if err != nil {
 		return 0, err
 	}
 	select {
-	case d.queue <- job{id: id, app: appName, kind: kind, release: release}:
+	case d.queue <- job{id: id, app: appName, kind: kind, ref: ref}:
 	default:
 		d.finish(id, errors.New("deploy queue is full"))
 		return 0, errors.New("deploy queue is full")
@@ -348,10 +394,10 @@ func (d *Deployer) runJob(j job) {
 	d.log.Info("deployment started", "app", j.app, "id", j.id, "kind", j.kind)
 
 	if j.kind == KindRollback {
-		lg.Writef("rollback of %s to release %s", j.app, j.release)
+		lg.Writef("rollback of %s to build %s", j.app, j.ref)
 		err = d.rollback(d.ctx, cfg, j, lg)
 	} else {
-		lg.Writef("deploy of %s: release %s of %s", j.app, j.release, cfg.Repo)
+		lg.Writef("%s of %s: commit %s on branch %s of %s", j.kind, j.app, short(j.ref), cfg.Branch, cfg.Repo)
 		err = d.deploy(d.ctx, cfg, j, lg)
 	}
 	took := time.Since(start).Round(100 * time.Millisecond)
@@ -364,7 +410,7 @@ func (d *Deployer) runJob(j job) {
 	}
 	lg.Close()
 	d.finish(j.id, err)
-	d.ForgetReleases(j.app) // the page shows fresh releases after a deploy
+	d.ForgetCommits(j.app) // the page shows fresh commits after a deploy
 	d.pruneBuildLogs(j.app)
 }
 
@@ -395,142 +441,60 @@ func (d *Deployer) SetGitHubToken(ctx context.Context, token string) error {
 	return d.Store.SetSetting(ctx, SettingGitHubToken, sealed)
 }
 
+// deploy brings commit j.ref live. A kept build of the commit is switched to
+// without a download. Otherwise the commit is prepared (the old build keeps
+// serving) and activated; the new build replaces the old one only in the
+// switch, and activate restores the old one if the new one fails.
 func (d *Deployer) deploy(ctx context.Context, cfg AppConfig, j job, lg *logs.Log) error {
-	name, tag := cfg.Base.Name, j.release
-	d.setRelease(j.id, tag, "")
+	name := cfg.Base.Name
+	id := BuildID(j.ref)
+	d.setBuild(j.id, id, j.ref)
 
-	// A release still kept on the server needs no download, unless its
-	// files have gone missing: then it is downloaded again.
-	if kept, err := d.release(ctx, name, tag); err == nil {
-		if d.releaseIntact(kept) {
-			lg.Writef("release %s is still kept on this server; switching to it (no download)", tag)
-			return d.activate(ctx, cfg, kept, j.id, lg)
+	if j.kind == KindDeploy {
+		if kept, err := d.build(ctx, name, id); err == nil && d.buildIntact(kept) {
+			lg.Writef("build %s is still kept on this server: switching to it, no download", id)
+			return d.activate(ctx, cfg, kept, j.id, lg, nil)
 		}
-		lg.Writef("release %s is recorded but its files are missing on this server; downloading it again", tag)
-		d.removeRelease(name, tag, lg)
 	}
-
-	// 1. The GitHub release and its assets. The running release keeps
-	// serving during steps 1-4.
-	token, err := d.GitHubToken(ctx)
+	b, work, err := d.prepare(ctx, cfg, j, lg)
 	if err != nil {
 		return err
 	}
-	api := &github.API{Token: token}
-	rel, err := api.ReleaseByTag(ctx, cfg.Repo, tag)
-	if err != nil {
+	in := &installation{d: d, b: b, work: work}
+	defer func() { os.RemoveAll(work) }() // no-op once the build was moved into place
+	if err := d.activate(ctx, cfg, b, j.id, lg, in); err != nil {
+		in.undo()
 		return err
 	}
-	assetName := artifact.AssetName(runtime.GOARCH)
-	asset, ok := rel.Asset(assetName)
-	if !ok {
-		var names []string
-		for _, a := range rel.Assets {
-			names = append(names, a.Name)
-		}
-		have := "none"
-		if len(names) > 0 {
-			have = strings.Join(names, ", ")
-		}
-		return fmt.Errorf("release %s has no %s for this server (it has: %s); publish it with the release workflow from docs/app-contract.md §2", tag, assetName, have)
-	}
-	sumsAsset, ok := rel.Asset(artifact.ChecksumsName)
-	if !ok {
-		return fmt.Errorf("release %s has no %s, so its download cannot be verified", tag, artifact.ChecksumsName)
-	}
-
-	ws := filepath.Join(d.Layout.DownloadsDir(name), strconv.FormatInt(j.id, 10))
-	os.RemoveAll(ws)
-	if err := os.MkdirAll(ws, 0o700); err != nil {
-		return err
-	}
-	defer os.RemoveAll(ws)
-
-	// 2. Download and verify.
-	sumsPath := filepath.Join(ws, artifact.ChecksumsName)
-	if err := api.Download(ctx, cfg.Repo, sumsAsset.ID, sumsPath, maxChecksums); err != nil {
-		return err
-	}
-	sums, err := os.ReadFile(sumsPath)
-	if err != nil {
-		return err
-	}
-	want, err := artifact.Checksum(sums, assetName)
-	if err != nil {
-		return err
-	}
-	lg.Writef("downloading %s (%.1f MB)", assetName, float64(asset.Size)/(1<<20))
-	tarPath := filepath.Join(ws, assetName)
-	if err := api.Download(ctx, cfg.Repo, asset.ID, tarPath, maxAsset); err != nil {
-		return err
-	}
-	got, err := artifact.FileSHA256(tarPath)
-	if err != nil {
-		return err
-	}
-	if got != want {
-		return fmt.Errorf("checksum mismatch for %s: %s says %s, the download is %s; nothing was changed", assetName, artifact.ChecksumsName, want, got)
-	}
-	lg.Writef("sha256 %s matches %s", got[:16], artifact.ChecksumsName)
-
-	// 3. Unpack and check.
-	dir := filepath.Join(ws, "release")
-	if err := artifact.Unpack(tarPath, dir, artifact.MaxUnpacked); err != nil {
-		return fmt.Errorf("unpack %s: %w", assetName, err)
-	}
-	m, err := manifest.Load(dir)
-	if err != nil {
-		return err
-	}
-	lg.Writef("phpboat.toml: docroot %q, health %s, php settings %v", m.Docroot, m.HealthPath, m.PHP)
-
-	// 4. Keep it as an immutable release (root-owned, read-only to the app).
-	relDir := d.Layout.ReleaseDir(name, tag)
-	os.RemoveAll(relDir) // a stray directory from an interrupted deploy
-	if err := os.Rename(dir, relDir); err != nil {
-		return fmt.Errorf("store release: %w", err)
-	}
-	subject := rel.Name
-	if subject == "" {
-		subject = tag
-	}
-	kept := Release{App: name, ID: tag, Subject: subject, SHA256: got, Manifest: m, CreatedAt: time.Now()}
-	if err := d.insertRelease(ctx, kept); err != nil {
-		os.RemoveAll(relDir)
-		return fmt.Errorf("record release: %w", err)
-	}
-
-	// 5-9. Switch with health check; roll back on failure.
-	if err := d.activate(ctx, cfg, kept, j.id, lg); err != nil {
-		d.removeRelease(name, tag, lg)
-		return err
-	}
-	d.pruneReleases(name, lg)
+	in.commit()
+	d.pruneBuilds(name, lg)
 	return nil
 }
 
 func (d *Deployer) rollback(ctx context.Context, cfg AppConfig, j job, lg *logs.Log) error {
-	rel, err := d.release(ctx, cfg.Base.Name, j.release)
+	b, err := d.build(ctx, cfg.Base.Name, j.ref)
 	if err != nil {
 		return err
 	}
-	d.setRelease(j.id, rel.ID, "")
-	if !d.releaseIntact(rel) {
-		return fmt.Errorf("the files of release %s are missing on this server; deploy %s from the release list instead (it is downloaded again)", rel.ID, rel.ID)
+	d.setBuild(j.id, b.ID, b.CommitSHA)
+	if !d.buildIntact(b) {
+		return fmt.Errorf("the files of build %s are missing on this server: deploy commit %s again instead", b.ID, short(b.CommitSHA))
 	}
-	return d.activate(ctx, cfg, rel, j.id, lg)
+	return d.activate(ctx, cfg, b, j.id, lg, nil)
 }
 
-// releaseIntact reports whether a kept release's docroot is still on disk.
-func (d *Deployer) releaseIntact(rel Release) bool {
-	fi, err := os.Stat(filepath.Join(d.Layout.ReleaseDir(rel.App, rel.ID), rel.Manifest.Docroot))
+// buildIntact reports whether a kept build's docroot is still on disk.
+func (d *Deployer) buildIntact(b Build) bool {
+	fi, err := os.Stat(filepath.Join(d.Layout.BuildDir(b.App, b.ID), b.Manifest.Docroot))
 	return err == nil && fi.IsDir()
 }
 
-// activate stops the old release, runs the pre-deploy hook, switches the
-// `current` symlink and starts rel. If rel does not become healthy, the
-// previous release is restored.
-func (d *Deployer) activate(ctx context.Context, cfg AppConfig, rel Release, id int64, lg *logs.Log) error {
+// activate switches the app to build b. It stops the old build, runs the
+// pre-deploy hook, moves the new build into place (in, if set), links the
+// persist folders, switches `current` and starts the build (before_start
+// runs first). If the new build does not start or is not healthy, the
+// previous build is restored.
+func (d *Deployer) activate(ctx context.Context, cfg AppConfig, b Build, id int64, lg *logs.Log, in *installation) error {
 	name := cfg.Base.Name
 	a := d.Supervisor.Get(name)
 	if a == nil {
@@ -557,39 +521,40 @@ func (d *Deployer) activate(ctx context.Context, cfg AppConfig, rel Release, id 
 
 	// Detached from the job context so a shutdown mid-switch still leaves
 	// a consistent state.
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activateTimeout)
 	defer cancel()
 
-	if prevSpec.ReleaseID != "" {
-		lg.Writef("stopping release %s (state %s)", prevSpec.ReleaseID, prevState)
+	if prevSpec.BuildID != "" {
+		lg.Writef("stopping build %s (state %s)", prevSpec.BuildID, prevState)
 	}
 	if err := a.Stop(sctx); err != nil {
-		return fmt.Errorf("stop old release: %w", err)
+		return fmt.Errorf("stop old build: %w", err)
 	}
 
 	restorePrev := func(reason error) error {
-		if prevSpec.ReleaseID == "" {
+		in.undo()
+		if prevSpec.BuildID == "" {
 			os.Remove(d.Layout.CurrentLink(name))
 			a.Update(sctx, cfg.Base)
-			lg.Writef("no previous release to go back to; the app stays stopped")
+			lg.Writef("no previous build to go back to; the app stays stopped")
 			return reason
 		}
-		if err := d.swapCurrent(name, prevSpec.ReleaseID); err != nil {
-			return fmt.Errorf("%v; restoring the previous release also failed: %w", reason, err)
+		if err := d.swapCurrent(name, prevSpec.BuildID); err != nil {
+			return fmt.Errorf("%v; restoring the previous build also failed: %w", reason, err)
 		}
 		if err := a.Update(sctx, prevSpec); err != nil {
-			return fmt.Errorf("%v; restoring the previous release also failed: %w", reason, err)
+			return fmt.Errorf("%v; restoring the previous build also failed: %w", reason, err)
 		}
 		if !wasRunning {
-			lg.Writef("switched back to release %s (left stopped, as it was before)", prevSpec.ReleaseID)
-			return fmt.Errorf("%w; switched back to release %s", reason, prevSpec.ReleaseID)
+			lg.Writef("switched back to build %s (left stopped, as it was before)", prevSpec.BuildID)
+			return fmt.Errorf("%w; switched back to build %s", reason, prevSpec.BuildID)
 		}
 		if err := a.Start(sctx); err != nil {
-			lg.Writef("previous release %s also failed to start: %v", prevSpec.ReleaseID, err)
-			return fmt.Errorf("%w; rolled back to release %s, which also failed to start: %v", reason, prevSpec.ReleaseID, err)
+			lg.Writef("previous build %s also failed to start: %v", prevSpec.BuildID, err)
+			return fmt.Errorf("%w; rolled back to build %s, which also failed to start: %v", reason, prevSpec.BuildID, err)
 		}
-		lg.Writef("rolled back: release %s is serving again", prevSpec.ReleaseID)
-		return fmt.Errorf("%w; rolled back to release %s", reason, prevSpec.ReleaseID)
+		lg.Writef("rolled back: build %s is serving again", prevSpec.BuildID)
+		return fmt.Errorf("%w; rolled back to build %s", reason, prevSpec.BuildID)
 	}
 
 	if d.PreDeploy != nil {
@@ -597,37 +562,45 @@ func (d *Deployer) activate(ctx context.Context, cfg AppConfig, rel Release, id 
 			return restorePrev(fmt.Errorf("pre-deploy backup failed: %w", err))
 		}
 	}
-	if err := d.swapCurrent(name, rel.ID); err != nil {
-		return restorePrev(fmt.Errorf("switch release: %w", err))
+	if in != nil {
+		lg.Writef("moving build %s into place", b.ID)
+		if err := in.apply(sctx); err != nil {
+			return restorePrev(fmt.Errorf("move build %s into place: %w", b.ID, err))
+		}
+	}
+	if err := d.linkPersist(name, u, d.Layout.BuildDir(name, b.ID), b.Manifest.Persist, lg); err != nil {
+		return restorePrev(fmt.Errorf("persist folders: %w", err))
+	}
+	if err := d.swapCurrent(name, b.ID); err != nil {
+		return restorePrev(fmt.Errorf("switch build: %w", err))
 	}
 	if err := d.Layout.WipeTmp(name, u); err != nil {
 		lg.Writef("warning: %v", err)
 	}
-	newSpec := d.specFor(cfg, rel)
-	if err := a.Update(sctx, newSpec); err != nil {
+	if err := a.Update(sctx, d.specFor(cfg, b)); err != nil {
 		return restorePrev(err)
 	}
-	lg.Writef("starting release %s", rel.ID)
+	lg.Writef("starting build %s (before_start scripts first)", b.ID)
 	if err := a.Start(sctx); err != nil {
-		lg.Writef("release %s is not healthy: %v", rel.ID, err)
+		lg.Writef("build %s did not start: %v", b.ID, err)
 		if e := a.Stop(sctx); e != nil {
-			lg.Writef("warning: stopping the failed release: %v", e)
+			lg.Writef("warning: stopping the failed build: %v", e)
 		}
-		return restorePrev(fmt.Errorf("new release failed its health check: %w", err))
+		return restorePrev(fmt.Errorf("build %s failed to start or its health check: %w", b.ID, err))
 	}
-	lg.Writef("release %s is healthy; downtime %s", rel.ID, time.Since(downStart).Round(10*time.Millisecond))
+	lg.Writef("build %s is healthy; downtime %s", b.ID, time.Since(downStart).Round(10*time.Millisecond))
 	if err := d.SetDesired(sctx, name, true); err != nil {
 		lg.Writef("warning: %v", err)
 	}
 	return nil
 }
 
-// swapCurrent atomically points apps/<app>/current at releases/<id>.
-func (d *Deployer) swapCurrent(appName, releaseID string) error {
+// swapCurrent atomically points apps/<app>/current at builds/<id>.
+func (d *Deployer) swapCurrent(appName, buildID string) error {
 	link := d.Layout.CurrentLink(appName)
 	tmp := link + ".new"
 	os.Remove(tmp)
-	if err := os.Symlink(filepath.Join("releases", releaseID), tmp); err != nil {
+	if err := os.Symlink(filepath.Join("builds", buildID), tmp); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, link); err != nil {
@@ -637,48 +610,49 @@ func (d *Deployer) swapCurrent(appName, releaseID string) error {
 	return nil
 }
 
-func (d *Deployer) removeRelease(appName, id string, lg *logs.Log) {
-	if d.currentRelease(appName) == id {
+// removeBuild deletes a build that is not current, with its database row.
+func (d *Deployer) removeBuild(appName, id string, lg *logs.Log) {
+	if d.currentBuild(appName) == id {
 		return
 	}
-	if err := os.RemoveAll(d.Layout.ReleaseDir(appName, id)); err != nil {
-		lg.Writef("warning: removing release %s: %v", id, err)
+	if err := os.RemoveAll(d.Layout.BuildDir(appName, id)); err != nil {
+		lg.Writef("warning: removing build %s: %v", id, err)
 	}
-	if err := d.deleteRelease(appName, id); err != nil {
-		lg.Writef("warning: forgetting release %s: %v", id, err)
+	if err := d.deleteBuild(context.Background(), appName, id); err != nil {
+		lg.Writef("warning: forgetting build %s: %v", id, err)
 	}
 }
 
-// pruneReleases keeps the current release plus the newest others, up to
-// KeepReleases in total, and deletes stray release directories.
-func (d *Deployer) pruneReleases(appName string, lg *logs.Log) {
-	rs, err := d.Releases(context.Background(), appName)
+// pruneBuilds keeps the current build plus the newest others, up to
+// KeepBuilds in total, and deletes stray build directories.
+func (d *Deployer) pruneBuilds(appName string, lg *logs.Log) {
+	bs, err := d.Builds(context.Background(), appName)
 	if err != nil {
-		lg.Writef("warning: listing releases: %v", err)
+		lg.Writef("warning: listing builds: %v", err)
 		return
 	}
 	keep := map[string]bool{}
-	for _, r := range rs {
-		if r.Current {
-			keep[r.ID] = true
+	for _, b := range bs {
+		if b.Current {
+			keep[b.ID] = true
 		}
 	}
-	for _, r := range rs {
-		if len(keep) >= KeepReleases {
+	for _, b := range bs {
+		if len(keep) >= KeepBuilds {
 			break
 		}
-		keep[r.ID] = true
+		keep[b.ID] = true
 	}
-	for _, r := range rs {
-		if !keep[r.ID] {
-			lg.Writef("pruning old release %s", r.ID)
-			d.removeRelease(appName, r.ID, lg)
+	for _, b := range bs {
+		if !keep[b.ID] {
+			lg.Writef("pruning old build %s", b.ID)
+			d.removeBuild(appName, b.ID, lg)
 		}
 	}
-	entries, _ := os.ReadDir(d.Layout.ReleasesDir(appName))
+	entries, _ := os.ReadDir(d.Layout.BuildsDir(appName))
 	for _, e := range entries {
 		if !keep[e.Name()] {
-			os.RemoveAll(filepath.Join(d.Layout.ReleasesDir(appName), e.Name()))
+			os.RemoveAll(filepath.Join(d.Layout.BuildsDir(appName), e.Name()))
 		}
 	}
 }

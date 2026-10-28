@@ -88,7 +88,7 @@ func serve(log *slog.Logger) error {
 		ErrorPage: edge.ErrorPage,
 	}})
 	dep, err := deployer.New(ctx, deployer.Deps{
-		Layout: lay, Store: st, Secrets: box, Supervisor: sup, Log: log,
+		Layout: lay, Store: st, Secrets: box, Supervisor: sup, Cgroups: cg, PHP: phpRT.get, Log: log,
 	})
 	if err != nil {
 		return err
@@ -216,9 +216,9 @@ func newBackups(lay layout.Layout, st *store.Store, box *secrets.Box, sup *super
 				}
 				return names
 			},
-			Release: func(name string) string {
+			Build: func(name string) string {
 				if a := sup.Get(name); a != nil {
-					return a.Status().Release
+					return a.Status().Build
 				}
 				return ""
 			},
@@ -356,7 +356,7 @@ func (p *phpRuntime) watch(ctx context.Context, log *slog.Logger, sup *superviso
 func logStatus(log *slog.Logger, sup *supervisor.Supervisor) {
 	for _, a := range sup.Apps() {
 		s := a.Status()
-		attrs := []any{"app", a.Spec().Name, "state", s.State, "pid", s.PID, "release", s.Release,
+		attrs := []any{"app", a.Spec().Name, "state", s.State, "pid", s.PID, "build", s.Build,
 			"restarts", s.Restarts, "oom_kills", s.OOMKills}
 		if s.LastExit != "" {
 			attrs = append(attrs, "last_exit", s.LastExit)

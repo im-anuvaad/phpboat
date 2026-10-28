@@ -54,13 +54,35 @@ func (l Layout) AppsDir() string { return filepath.Join(l.Root, "apps") }
 // AppDir is <root>/apps/<app>.
 func (l Layout) AppDir(app string) string { return filepath.Join(l.AppsDir(), app) }
 
-// ReleasesDir is <root>/apps/<app>/releases.
-func (l Layout) ReleasesDir(app string) string { return filepath.Join(l.AppDir(app), "releases") }
+// ComposerPhar is the pinned Composer that the installer puts on the host
+// (docs/plan.md §3). It is outside the data root: nothing an app writes can
+// reach it.
+const ComposerPhar = "/usr/local/lib/phpboat/composer.phar"
 
-// ReleaseDir is <root>/apps/<app>/releases/<id>.
-func (l Layout) ReleaseDir(app, id string) string { return filepath.Join(l.ReleasesDir(app), id) }
+// BuildsDir is <root>/apps/<app>/builds: prepared builds, root-owned and
+// read-only to the app user.
+func (l Layout) BuildsDir(app string) string { return filepath.Join(l.AppDir(app), "builds") }
 
-// CurrentLink is <root>/apps/<app>/current (symlink to the live release).
+// BuildDir is <root>/apps/<app>/builds/<id>, the build that `current` points at.
+func (l Layout) BuildDir(app, id string) string { return filepath.Join(l.BuildsDir(app), id) }
+
+// BuildWork is where a build is prepared before it gets its final name. A
+// dot name never collides with a build ID.
+func (l Layout) BuildWork(app, id string) string {
+	return filepath.Join(l.BuildsDir(app), "."+id+".partial")
+}
+
+// BuildAside is where an existing build with the same ID is kept while a
+// rebuild of the same commit is being tested.
+func (l Layout) BuildAside(app, id string) string {
+	return filepath.Join(l.BuildsDir(app), "."+id+".old")
+}
+
+// ComposerHome is COMPOSER_HOME of the app: Composer's cache, kept across
+// deploys.
+func (l Layout) ComposerHome(app string) string { return filepath.Join(l.AppDir(app), "composer") }
+
+// CurrentLink is <root>/apps/<app>/current (symlink to the live build).
 func (l Layout) CurrentLink(app string) string { return filepath.Join(l.AppDir(app), "current") }
 
 // DataDir is the app's DATA_DIR.
@@ -92,7 +114,7 @@ func (l Layout) AppLog(app string) string { return filepath.Join(l.LogsDir(app),
 // BuildLogsDir holds the per-deployment logs.
 func (l Layout) BuildLogsDir(app string) string { return filepath.Join(l.LogsDir(app), "builds") }
 
-// DownloadsDir is <root>/downloads/<app>: temporary release downloads.
+// DownloadsDir is <root>/downloads/<app>: source archives while they are unpacked.
 func (l Layout) DownloadsDir(app string) string { return filepath.Join(l.Root, "downloads", app) }
 
 // BuildLog is the log file of one deployment.
@@ -110,7 +132,8 @@ func (l Layout) appDirs(app string) []dir {
 	return []dir{
 		{l.AppsDir(), 0o711, false},
 		{l.AppDir(app), 0o711, false},
-		{l.ReleasesDir(app), 0o755, false},
+		{l.BuildsDir(app), 0o755, false},
+		{l.ComposerHome(app), 0o700, true},
 		{l.DataDir(app), 0o700, true},
 		{l.TmpDir(app), 0o700, true},
 		{l.RunDir(app), 0o700, true},

@@ -107,7 +107,7 @@ Migrations go in a `before_start` script. phpboat backs up the data right before
 | `TMPDIR` | `/var/lib/phpboat/apps/blog/tmp` |
 | `PHPBOAT_APP` | `blog` |
 | `PHPBOAT_DOMAIN` | `blog.example.com` |
-| `PHPBOAT_RELEASE` | `3f9c2a71b0de` (build ID: commit prefix) |
+| `PHPBOAT_RELEASE` | `3f9c2a71b0de` (build ID: the first 12 hex digits of the commit) |
 | `PHPBOAT_COMMIT` | the full commit SHA |
 | `PHPBOAT_CONTRACT` | `1` |
 
@@ -116,7 +116,7 @@ Plus your own from the dashboard (changes need a **Restart**). Read them with `g
 ## 8. Lifecycle
 
 ```
-Deploy ─► download commit ─► composer install ─► [503] stop ─► backup ─► switch ─► before_start ─► start ─► health check ─► live
+Deploy ─► download commit ─► composer install ─► [503] stop ─► backup ─► persist folders ─► switch ─► before_start ─► start ─► health check ─► live
                                                                                                    └─ fails ─► back to the previous commit
 ```
 
