@@ -74,7 +74,8 @@ Unknown keys fail the deploy, so typos don't go unnoticed. All paths are relativ
 - The code is read-only. Writing next to your scripts fails; write to `DATA_DIR`, a `persist` folder or `TMPDIR`.
 - A `persist` folder's committed content (e.g. a `.gitkeep`, default images) is copied in on the first deploy only. Later deploys never overwrite what's there.
 - Files in a `persist` folder inside the docroot are served as static files, never executed as PHP.
-- **Backups** take every file in `DATA_DIR`: SQLite databases as consistent snapshots, other files copied as they are at that moment (a file being written during the backup may be the previous version). Limit: 2 GB per app.
+- **Backups** take the whole `DATA_DIR`. SQLite databases are copied as consistent snapshots. Every other file is copied as it is at that moment, so each file is consistent only by itself: a file written during the backup may be the previous version, or missing if it was deleted meanwhile. Symbolic links are kept as links and never followed; sockets and other special files are skipped; `.pre-restore-*` folders are never backed up. Limit: 2 GB of content per app.
+- **Restore** replaces the whole `DATA_DIR`. The data it replaces is moved to `DATA_DIR/.pre-restore-<unix-time>/` (the newest two are kept). Links that point outside `DATA_DIR` are not put back.
 
 ## 5. SQLite
 
