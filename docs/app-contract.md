@@ -129,7 +129,7 @@ Deploy ─► download commit ─► composer install ─► [503] stop ─► b
 ```
 
 - `before_start` scripts and cron jobs run as `php <script>` from the code's root, with your env vars. Exit code 0 = success.
-- A cron run is skipped and recorded as `skipped` (not logged) if the app is stopped, crashed, deploying or being restored, or if the previous run of the same job is still going. The app page lists each job's last 10 runs, from the last 20 kept.
+- A due cron run is recorded as `skipped` if the app is being deployed or restored, or if the previous run of the same job is still going. Nothing is recorded while the app is stopped or crashed. The app page lists each job's last 10 runs, from the last 20 kept.
 - Output of cron jobs goes to the app's log, each line tagged `cron:<n>` (`n` is the job's position in `phpboat.toml`). A deploy stops the app's cron jobs first: running jobs get 30 seconds to finish, then they are killed and recorded as `killed`.
 - Jobs due while phpboat is down do not run afterwards.
 - Output of `before_start` scripts goes to the app's log.

@@ -129,10 +129,14 @@ func (s *Scheduler) tick(ctx context.Context, minute time.Time) {
 func (s *Scheduler) dispatch(ctx context.Context, p Process, name string, n int, j app.CronJob, sched schedule.Schedule, minute time.Time) {
 	k := key{app: name, job: n}
 	s.mu.Lock()
+	if !p.Running() {
+		// A stopped or crashed app has nothing to run. Recording a skip every
+		// minute would fill the history with nothing.
+		s.mu.Unlock()
+		return
+	}
 	var reason string
 	switch {
-	case !p.Running():
-		reason = "the app is not running"
 	case s.cfg.Busy(name):
 		reason = "the app is being deployed or restored"
 	case s.running[k] != nil:
