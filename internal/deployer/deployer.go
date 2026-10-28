@@ -179,6 +179,7 @@ func New(ctx context.Context, d Deps) (*Deployer, error) {
 func (d *Deployer) Register(ctx context.Context, cfg AppConfig) (*supervisor.App, error) {
 	spec := cfg.Base
 	d.recoverWork(spec.Name)
+	d.recoverSwitch(spec.Name)
 	if cur := d.currentBuild(spec.Name); cur != "" {
 		b, err := d.build(ctx, spec.Name, cur)
 		if err != nil {
@@ -566,6 +567,12 @@ func (d *Deployer) activate(ctx context.Context, cfg AppConfig, b Build, id int6
 	if err := a.Stop(sctx); err != nil {
 		return fmt.Errorf("stop old build: %w", err)
 	}
+	// From here until the switch is settled, current.prev names the build
+	// to go back to if phpboat dies in between (recoverSwitch).
+	if err := d.markSwitch(name, prevSpec.BuildID); err != nil {
+		lg.Writef("warning: %v", err)
+	}
+	defer os.Remove(d.Layout.PreviousLink(name))
 
 	restorePrev := func(reason error) error {
 		in.undo()
@@ -629,6 +636,59 @@ func (d *Deployer) activate(ctx context.Context, cfg AppConfig, b Build, id int6
 		lg.Writef("warning: %v", err)
 	}
 	return nil
+}
+
+// noPrevious is the current.prev target when the app had no build before.
+const noPrevious = "none"
+
+// markSwitch records prevID ("" = none) in current.prev before a deploy
+// starts switching builds.
+func (d *Deployer) markSwitch(appName, prevID string) error {
+	target := noPrevious
+	if prevID != "" {
+		target = filepath.Join("builds", prevID)
+	}
+	m := d.Layout.PreviousLink(appName)
+	os.Remove(m)
+	if err := os.Symlink(target, m); err != nil {
+		return fmt.Errorf("record the previous build: %w", err)
+	}
+	return nil
+}
+
+// recoverSwitch runs at startup. If phpboat died while a deploy was
+// switching builds (current.prev exists), the new build was never found
+// healthy, so current goes back to the build recorded there. The new build
+// stays on disk as a kept build (it may be a kept build being rolled back to)
+// and is pruned like any other.
+func (d *Deployer) recoverSwitch(appName string) {
+	m := d.Layout.PreviousLink(appName)
+	t, err := os.Readlink(m)
+	if err != nil {
+		return
+	}
+	defer os.Remove(m)
+	cur := d.currentBuild(appName)
+	if t == noPrevious {
+		if cur != "" {
+			os.Remove(d.Layout.CurrentLink(appName))
+			d.log.Warn("deploy interrupted by a restart: the app had no build before, so it stays undeployed", "app", appName, "build", cur)
+		}
+		return
+	}
+	prev := filepath.Base(t)
+	if cur == prev {
+		return
+	}
+	if fi, err := os.Stat(d.Layout.BuildDir(appName, prev)); err != nil || !fi.IsDir() {
+		d.log.Error("deploy interrupted by a restart: the previous build is gone, keeping the new one", "app", appName, "previous", prev, "build", cur)
+		return
+	}
+	if err := d.swapCurrent(appName, prev); err != nil {
+		d.log.Error("deploy interrupted by a restart: switching back failed", "app", appName, "previous", prev, "err", err)
+		return
+	}
+	d.log.Warn("deploy interrupted by a restart: switched back to the previous build", "app", appName, "previous", prev, "abandoned", cur)
 }
 
 // swapCurrent atomically points apps/<app>/current at builds/<id>.

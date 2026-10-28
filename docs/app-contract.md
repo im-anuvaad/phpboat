@@ -31,7 +31,7 @@ phpboat sits in front of PHP-FPM and decides per request, inside the docroot of 
 | an uploaded `.html` or `.svg` | served with a sandboxing CSP, so its scripts can't run on your domain |
 | anything else | `index.php` of the docroot if it exists (pretty URLs: read `$_SERVER['REQUEST_URI']`), else 404 |
 
-You can rely on: `$_SERVER['REMOTE_ADDR']` is the **real visitor IP** (from Cloudflare), `$_SERVER['HTTPS'] === 'on'`, `$_SERVER['HTTP_HOST']` is your domain, `$_SERVER['HTTP_CF_IPCOUNTRY']` is passed through. No proxy settings are needed. Requests are limited to 100 MB (Cloudflare) and 95 s, request headers to 32 KB. Headers whose name contains `_` and `X-Forwarded-*`/`Forwarded` never reach PHP. PHP output is streamed: `flush()` reaches the visitor immediately (server-sent events work).
+You can rely on: `$_SERVER['REMOTE_ADDR']` is the **real visitor IP** (from Cloudflare), `$_SERVER['HTTPS'] === 'on'`, `$_SERVER['HTTP_HOST']` is your domain, `$_SERVER['HTTP_CF_IPCOUNTRY']` is passed through. No proxy settings are needed. Requests are limited to 100 MB (Cloudflare) and 95 s, request headers to 32 KB. Headers whose name contains `_` and `X-Forwarded-*`/`Forwarded` never reach PHP. PHP output is streamed: what PHP flushes reaches the visitor immediately, so server-sent events work. PHP keeps Ubuntu's `output_buffering = 4096`, so `echo` before `header()` keeps working, but a plain `flush()` doesn't empty that buffer: before streaming, call `while (ob_get_level()) { ob_end_flush(); }` once, then `flush()` after each event.
 
 ## 3. `phpboat.toml` (optional)
 
