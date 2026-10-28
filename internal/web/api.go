@@ -152,11 +152,19 @@ type apiAppSummary struct {
 	BackupIssue  string           `json:"backup_problem"`
 }
 
+// apiPHP is the host's PHP: the version the apps run and the installed
+// php-fpm package that apt keeps up to date.
+type apiPHP struct {
+	Version string `json:"version"`
+	Package string `json:"package"`
+}
+
 type apiStatusResponse struct {
 	OK       bool            `json:"ok"`
 	Version  string          `json:"phpboat_version"`
 	Time     apiTime         `json:"time"`
 	Host     apiHost         `json:"host"`
+	PHP      *apiPHP         `json:"php"`
 	Summary  apiSummary      `json:"summary"`
 	Warnings []string        `json:"warnings"`
 	Apps     []apiAppSummary `json:"apps"`
@@ -288,6 +296,7 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 			MemoryTotal: h.MemTotal, MemoryUsed: h.MemTotal - h.MemAvailable, MemoryUsedPct: apiFloat(h.MemUsedPct()),
 			DiskTotal: h.DiskTotal, DiskFree: h.DiskFree, DiskUsedPct: apiFloat(h.DiskUsedPct()),
 		},
+		PHP:      s.phpInfo(),
 		Warnings: nonNil(s.warnings(r, rows)),
 		Apps:     []apiAppSummary{},
 	}
@@ -414,4 +423,17 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// phpInfo is the host's PHP for the dashboard and the status API. It is nil
+// when no PHP is installed or the server has no PHP source.
+func (s *Server) phpInfo() *apiPHP {
+	if s.PHP == nil {
+		return nil
+	}
+	rt, pkg := s.PHP()
+	if rt.Version == "" {
+		return nil
+	}
+	return &apiPHP{Version: rt.Version, Package: pkg}
 }

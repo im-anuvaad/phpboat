@@ -157,7 +157,7 @@ func serve(log *slog.Logger) error {
 
 	dash := &web.Server{
 		Auth: authSvc, Apps: appSvc, Dep: dep, Sup: sup, Edge: edgeMgr, Store: st,
-		Backups: bk, Metrics: mc,
+		Backups: bk, Metrics: mc, PHP: phpRT.info,
 		Thresholds: web.Thresholds{DiskPercent: 85, MemoryPercent: 90, CertDays: 14},
 		Layout:     lay, Version: buildinfo.Version, Log: log.With("component", "web"),
 	}
@@ -322,6 +322,7 @@ type phpRuntime struct {
 	mu  sync.Mutex
 	rt  php.Runtime
 	err error
+	pkg string // installed php-fpm package version; set at detection and on each PHP update
 	log *slog.Logger
 }
 
@@ -341,9 +342,21 @@ func (p *phpRuntime) get() (php.Runtime, error) {
 	if p.err != nil {
 		p.log.Error("no PHP: apps cannot start", "err", p.err)
 	} else {
-		p.log.Info("PHP found", "version", p.rt.Version, "fpm", p.rt.FPM, "build", p.rt.Build(context.Background()))
+		p.pkg = p.rt.Build(context.Background())
+		p.log.Info("PHP found", "version", p.rt.Version, "fpm", p.rt.FPM, "build", p.pkg)
 	}
 	return p.rt, p.err
+}
+
+// info is the host's PHP and its installed package version, from the cache
+// (the dashboard reads it on every page; it does not call dpkg).
+func (p *phpRuntime) info() (php.Runtime, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err != nil {
+		return php.Runtime{}, ""
+	}
+	return p.rt, p.pkg
 }
 
 // watch restarts the running apps one at a time when apt updates PHP:
@@ -360,6 +373,9 @@ func (p *phpRuntime) watch(ctx context.Context, log *slog.Logger, sup *superviso
 	}
 	rt.Watch(ctx, 10*time.Minute, func(old, cur string) {
 		log.Warn("PHP was updated; restarting the running apps one at a time", "from", old, "to", cur)
+		p.mu.Lock()
+		p.pkg = cur
+		p.mu.Unlock()
 		for _, a := range sup.Apps() {
 			if a.Status().State != supervisor.Running {
 				continue

@@ -1,6 +1,6 @@
 # phpboat Status API
 
-> Build and commit fields since phase 4 of [plan.md](plan.md). A PHP version field follows in phase 7.
+> Build and commit fields since phase 4, and the `php` field since phase 7, of [plan.md](plan.md).
 
 A small **read-only** JSON API for scripts and AI agents: "is my blog up?", "why is the shop unhealthy?", "when was the last backup?". It can't deploy, stop, restart or change anything; that stays in the dashboard.
 
@@ -52,6 +52,7 @@ For an agent, `status` answers almost everything in one call; use `apps/{name}` 
     "disk_free_bytes": 19327352832,
     "disk_used_percent": 25
   },
+  "php": { "version": "8.5", "package": "8.5.4-0ubuntu1.5" },
   "summary": { "apps": 2, "healthy": 1, "unhealthy": 1 },
   "warnings": [
     "shop has crashed and is not being restarted: exit status 1"
@@ -79,6 +80,7 @@ For an agent, `status` answers almost everything in one call; use `apps/{name}` 
 ```
 
 - `ok` is `true` when every app is healthy. Warnings (disk filling up, a failed backup, a missing setup step) don't change `ok`; read them too.
+- `php` is the host's PHP. `version` is the one the apps run (`8.5`), and `package` is the installed `php-fpm` package, which apt updates. When `package` changes, phpboat restarts the apps one at a time to load the new PHP. `php` is `null` if PHP is not installed.
 - `warnings` are the same messages the dashboard home page shows.
 
 ### App fields
