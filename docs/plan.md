@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026); phases 0–4 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md)); next: phase 5.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 is on hold until the user asks for it. Ubuntu 24.04 is untested.** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -220,9 +220,9 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 | **2. FastCGI + static** ✅ | `internal/fastcgi` (client, params, streaming, fuzz tests, `fcgitest` fake); `internal/phpserve` (routing rules §4, static files, P14, docroot `.` denylist) | unit tests (~89 % coverage) + real php-fpm 8.5/8.3 integration tests (CI installs php-fpm); `spike/check.sh` 31/31 on both through the new packages; vs nginx: SQLite pages equal, light pages +0.2–0.4 ms p50 and −10–30 % req/s on a shared 1 vCPU (phase 1 spike: −45 %) |
 | **3. PHP runtime** ✅ | `internal/php` (runtime detection, pool + ini rendering with the `[php]` allowlist, apt-update watch); supervisor runs `php-fpm -F` per app (pipes owned by the app user, SIGQUIT stop, FastCGI health check, session cleanup); the router serves apps through `phpserve`; contract env without `PORT`/`HOST`; `phpboat.toml` contract 1; PHP workers setting; F5 app memory | end to end on the VPS through Cloudflare (`pb.numa.im`, `hello.numa.im`, sample repo `im-anuvaad/phpboat-sample-hello`): deploy healthy in 205 ms (210 ms downtime), bad `phpboat.toml` and unhealthy releases refused/rolled back, rollback, env vars + restart, workers → `memory_limit`, stop/start, `kill -9` of phpboat (stale workers reaped, app back), update via `setup-host`, direct IP refused; phpboat RSS 25 MB |
 | **4. Source deploys** ✅ | `github` (branches, commits, tarball); `manifest` → `phpboat.toml` + defaults; deployer prepare stage (Composer, build cgroup), builds keyed by SHA, persist links, `before_start`; squashed migration; dashboard: Add app with branch, commits list, Rebuild; delete the release/asset code | deploy, redeploy, rollback, broken Composer, failing `before_start`, all on a VPS ([results](phase4-results.md)) |
-| **5. Full-data backups** | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server |
-| **6. Cron** | `phpboat.toml` cron parsing, scheduler, no-overlap, timeouts, history, app page section | jobs run, skip while deploying, show history |
-| **7. Installer** | apt packages, masked distro FPM, pinned Composer, both Ubuntu releases; PHP version on home page + API | fresh install and update on 24.04 and 26.04 |
+| **5. Full-data backups** ✅ | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server ([results](phase5-7-results.md)) |
+| **6. Cron** ✅ | `phpboat.toml` cron parsing, scheduler, no-overlap, timeouts, history, app page section | jobs run, skip while deploying, show history ([results](phase5-7-results.md)) |
+| **7. Installer** ✅ | apt packages, masked distro FPM, pinned Composer, both Ubuntu releases; PHP version on home page + API | fresh install and update on 24.04 and 26.04: 26.04 done, 24.04 untested ([results](phase5-7-results.md)) |
 | **8. Docs + v1.0.0** | README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on both releases |
 
 Phases 2 and 4 don't depend on each other and can run in parallel after phase 1; 5 and 6 need 4.
