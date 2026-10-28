@@ -202,6 +202,30 @@ func (a *App) Handler() http.Handler {
 // Log returns the app's log (for live tailing).
 func (a *App) Log() *logs.Log { return a.log }
 
+// Running reports whether the app is up and healthy.
+func (a *App) Running() bool { return a.Status().State == Running }
+
+// RunCron runs `php <script>` for one cron job (docs/app-contract.md §8): as
+// the app user, in the app's cgroup, with the app's environment and PHP
+// settings, from the build directory. Its output goes to the app log, each
+// line with prefix in front. When ctx ends, only the job's own process group
+// is killed: the app's FPM workers share the cgroup.
+func (a *App) RunCron(ctx context.Context, prefix, script string) (phpcli.Result, error) {
+	if a.web.PHP == nil {
+		return phpcli.Result{}, php.ErrNotInstalled
+	}
+	rt, err := a.web.PHP()
+	if err != nil {
+		return phpcli.Result{}, err
+	}
+	spec := a.Spec()
+	return phpcli.Run(ctx, phpcli.Command{
+		Binary: rt.CLI, Ini: a.pool(spec).INI(), Args: []string{script}, Dir: spec.BuildDir,
+		Env: a.environ(spec), User: a.user, Group: a.group, Log: a.log,
+		Prefix: prefix, SharedGroup: true,
+	})
+}
+
 // Group returns the app's cgroup (for metrics).
 func (a *App) Group() *cgroup.Group { return a.group }
 
