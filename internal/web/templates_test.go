@@ -47,4 +47,12 @@ func TestTemplatesRender(t *testing.T) {
 	if err := s.pages["app"].ExecuteTemplate(&b, "layout", Page{Data: map[string]any{"App": &row}}); err != nil || !bytes.Contains(b.Bytes(), []byte("The branch has no commits yet")) {
 		t.Errorf("app without commits: %v", err)
 	}
+	// PHP files found in DATA_DIR by the last backup: the backups section warns.
+	php := row
+	php.PHPInData, php.PHPInDataList = 7, []string{"uploads/shell.php"}
+	b.Reset()
+	if err := s.pages["app"].ExecuteTemplate(&b, "layout", Page{Data: map[string]any{"App": &php}}); err != nil ||
+		!bytes.Contains(b.Bytes(), []byte("7 PHP file(s) found in the data folder at the last backup (uploads/shell.php, …)")) {
+		t.Errorf("app with PHP files in data: %v", err)
+	}
 }

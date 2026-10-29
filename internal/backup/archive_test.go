@@ -191,3 +191,29 @@ func TestNextSlot(t *testing.T) {
 		t.Fatalf("exact slot: %v", got)
 	}
 }
+
+func TestPHPFiles(t *testing.T) {
+	m := &Manifest{Entries: []Entry{
+		{Path: "app.sqlite", Kind: KindSQLite},
+		{Path: "uploads", Kind: KindDir},
+		{Path: "uploads/a.php", Kind: KindFile},
+		{Path: "uploads/b.PHTML", Kind: KindFile},
+		{Path: "uploads/c.txt", Kind: KindFile},
+		{Path: "uploads/d.inc", Kind: KindSymlink},
+		{Path: "x.php", Kind: KindDir}, // a folder named like PHP is not a file
+		{Path: "e.phar", Kind: KindFile},
+		{Path: "f.php5", Kind: KindFile},
+		{Path: "g.phps", Kind: KindFile},
+	}}
+	n, paths := phpFiles(m)
+	if n != 6 {
+		t.Fatalf("count = %d, want 6", n)
+	}
+	want := []string{"uploads/a.php", "uploads/b.PHTML", "uploads/d.inc", "e.phar", "f.php5"}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	if n, paths := phpFiles(&Manifest{Entries: []Entry{{Path: "a.txt", Kind: KindFile}}}); n != 0 || paths != nil {
+		t.Fatalf("no PHP: got %d %v", n, paths)
+	}
+}

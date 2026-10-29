@@ -1,6 +1,6 @@
 # phpboat — design and implementation plan
 
-Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 is on hold until the user asks for it. Ubuntu 24.04 is untested: v1 is tested on 26.04 only, and a 24.04 test run comes after v1 (not scheduled yet).** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
+Status: **decided (Oct 2026); phases 0–7 done ([phase 1 results](phase1-results.md), [phase 4 results](phase4-results.md), [phases 5–7 results](phase5-7-results.md)). Phase 8 in progress: the end-to-end run on 26.04 with R2 passed ([phase 8 results](phase8-e2e-results.md)); the final docs and the v1.0.0 tag are left. Ubuntu 24.04 is untested: v1 is tested on 26.04 only, and a 24.04 test run comes after v1 (not scheduled yet).** The code in this repo is binboat's, renamed and stripped of its Go/Zig/C-specific parts (§11). The phases in §12 turn it into phpboat. The app contract that results is drafted in [app-contract.md](app-contract.md).
 
 ## 1. What phpboat is
 
@@ -34,7 +34,7 @@ Cloudflare ──HTTPS──► phpboat ──FastCGI (unix socket)──► php
 | P11 | **Cron is built in** (per-app jobs in `phpboat.toml`, run by phpboat's own scheduler) | PHP has no long-running process to schedule work |
 | P12 | **No queue workers, daemons or any long-running app process** besides FPM | strict: keeps the supervisor and the memory budget simple |
 | P13 | **Plain PHP routing**: existing `.php` files run, other files are static, a front controller is the fallback (`try_files $uri $uri/ /index.php`) | how hand-written PHP sites are structured |
-| P14 | PHP never executes a file outside the deployed build (never from `$DATA_DIR`, never from an uploads folder) | an uploaded `shell.php` must never run |
+| P14 | phpboat never runs a file from outside the deployed build: never from `$DATA_DIR`, `$TMPDIR` or sessions, as a web request, a cron `run` or a `before_start` script. What app code `include`s is the app's responsibility (app contract §4). Each backup counts PHP-looking files in `$DATA_DIR` and the app page warns | an uploaded `shell.php` must never run. `open_basedir` must include `$DATA_DIR` for SQLite and uploads, and PHP can't allow reading a file while forbidding `include`, so the app's own includes can't be blocked (decided Oct 2026) |
 | P15 | **The memory budget is a release requirement**: measured on a real 1 GB VPS with 5 plain-PHP apps before v1 | "1 GB is enough" has to stay true |
 | P16 | `phpboat.toml` is optional; a repo with `public/index.php` deploys with no config | the target user shouldn't need to read a spec |
 
@@ -145,6 +145,7 @@ Schedule, retention, bucket layout, upload retries and badges stay as in binboat
 4. **Size cap**: 2 GB of uncompressed content per app (fixed). Above it the backup fails with "data folder too large to back up (x GB)" and the badge shows it. A pre-deploy backup above the cap does not block the deploy: it logs a warning and the deploy goes ahead (decided by the user after the phase 5 VPS test). **Q-later:** content-addressed dedup in the bucket (`<app>/blobs/<sha256>`, archives hold only the manifest) if real users hit the cap or the bucket cost; not in v1.
 5. **Restore** replaces the **whole** `$DATA_DIR`: verify everything in staging first (binboat D23), stop the app, move the current content to `$DATA_DIR/.pre-restore-<time>/` (last 2 kept, not backed up), move the restored files in, chown, start. Disk space is checked before stopping (needs the restored size + the current size).
 6. Local copies: newest 2 per app (binboat D22), counted in the disk warning.
+7. **PHP files in data**: each backup counts the files and links in `$DATA_DIR` whose names look like PHP (`.php`, `.phtml`, `.phar`, `.inc`, `.php3`–`.php8`, `.phps`; the same list phpserve refuses to send as source) and keeps the first 5 paths. The deploy log, the app page, the home page and the status API warn about them (P14). Nothing is blocked or removed.
 
 ## 8. Processes and limits
 
@@ -223,6 +224,6 @@ Each phase ends with `make lint test` green, and the risky ones with a real-VPS 
 | **5. Full-data backups** ✅ | archive format with files, size cap, restore of the whole `DATA_DIR`, disk check | backup + restore with uploads; restore into a new server ([results](phase5-7-results.md)) |
 | **6. Cron** ✅ | `phpboat.toml` cron parsing, scheduler, no-overlap, timeouts, history, app page section | jobs run, skip while deploying, show history ([results](phase5-7-results.md)) |
 | **7. Installer** ✅ | apt packages, masked distro FPM, pinned Composer, both Ubuntu releases; PHP version on home page + API | fresh install and update on 24.04 and 26.04: 26.04 done, 24.04 untested ([results](phase5-7-results.md)) |
-| **8. Docs + v1.0.0** | README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on 26.04 (24.04: after v1, not scheduled yet) |
+| **8. Docs + v1.0.0** | end-to-end run on a real VPS with R2 ✅ ([results](phase8-e2e-results.md)); README, architecture.md (with phase 1 numbers), app-contract.md final, api.md, site, logo | the binboat-style real-VPS checklist passes on 26.04 (24.04: after v1, not scheduled yet) |
 
 Phases 2 and 4 don't depend on each other and can run in parallel after phase 1; 5 and 6 need 4.

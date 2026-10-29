@@ -85,6 +85,11 @@ func (l Layout) ComposerHome(app string) string { return filepath.Join(l.AppDir(
 // CurrentLink is <root>/apps/<app>/current (symlink to the live build).
 func (l Layout) CurrentLink(app string) string { return filepath.Join(l.AppDir(app), "current") }
 
+// PreviousLink is <root>/apps/<app>/current.prev: while a deploy switches
+// builds, it records the build that was current before ("none" if there was
+// none), so a phpboat restart in the middle of the switch can go back to it.
+func (l Layout) PreviousLink(app string) string { return filepath.Join(l.AppDir(app), "current.prev") }
+
 // DataDir is the app's DATA_DIR.
 func (l Layout) DataDir(app string) string { return filepath.Join(l.AppDir(app), "data") }
 

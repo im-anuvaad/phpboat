@@ -18,6 +18,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/im-anuvaad/phpboat/internal/phpfile"
 )
 
 // ManifestVersion is the archive format version. Restore refuses every other
@@ -109,6 +111,27 @@ func inventoryOf(m *Manifest) Inventory {
 		}
 	}
 	return c
+}
+
+// MaxPHPPaths is how many PHP-looking paths a backup row keeps.
+const MaxPHPPaths = 5
+
+// phpFiles counts the files and links in m whose names look like PHP source
+// (phpfile.Like) and returns the first MaxPHPPaths of their paths. phpboat
+// never runs such a file (P14), but app code that includes one would.
+func phpFiles(m *Manifest) (int, []string) {
+	n := 0
+	var paths []string
+	for _, e := range m.Entries {
+		if (e.Kind != KindFile && e.Kind != KindSymlink) || !phpfile.Like(e.Path) {
+			continue
+		}
+		n++
+		if len(paths) < MaxPHPPaths {
+			paths = append(paths, e.Path)
+		}
+	}
+	return n, paths
 }
 
 // writeArchive writes out: manifest.json, then every entry of m in order.

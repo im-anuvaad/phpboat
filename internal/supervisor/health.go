@@ -62,7 +62,9 @@ func probe(ctx context.Context, site Pinger, sock, host, path string) error {
 	case err != nil:
 		return fmt.Errorf("GET %s: %w", path, err)
 	case code == http.StatusServiceUnavailable:
-		return errors.New("php-fpm is not accepting connections")
+		// phpserve answers 503 when FPM refuses the connection, and so can
+		// the app's own health script: name both.
+		return fmt.Errorf("GET %s returned 503 (from the app, or php-fpm is not accepting connections)", path)
 	case code == http.StatusBadGateway:
 		return fmt.Errorf("GET %s: php-fpm failed the request (see the app log)", path)
 	case code < 200 || code >= 400:

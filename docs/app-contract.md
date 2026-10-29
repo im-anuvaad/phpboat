@@ -31,7 +31,7 @@ phpboat sits in front of PHP-FPM and decides per request, inside the docroot of 
 | an uploaded `.html` or `.svg` | served with a sandboxing CSP, so its scripts can't run on your domain |
 | anything else | `index.php` of the docroot if it exists (pretty URLs: read `$_SERVER['REQUEST_URI']`), else 404 |
 
-You can rely on: `$_SERVER['REMOTE_ADDR']` is the **real visitor IP** (from Cloudflare), `$_SERVER['HTTPS'] === 'on'`, `$_SERVER['HTTP_HOST']` is your domain, `$_SERVER['HTTP_CF_IPCOUNTRY']` is passed through. No proxy settings are needed. Requests are limited to 100 MB (Cloudflare) and 95 s, request headers to 32 KB. Headers whose name contains `_` and `X-Forwarded-*`/`Forwarded` never reach PHP. PHP output is streamed: `flush()` reaches the visitor immediately (server-sent events work).
+You can rely on: `$_SERVER['REMOTE_ADDR']` is the **real visitor IP** (from Cloudflare), `$_SERVER['HTTPS'] === 'on'`, `$_SERVER['HTTP_HOST']` is your domain, `$_SERVER['HTTP_CF_IPCOUNTRY']` is passed through. No proxy settings are needed. Requests are limited to 100 MB (Cloudflare) and 95 s, request headers to 32 KB. Headers whose name contains `_` and `X-Forwarded-*`/`Forwarded` never reach PHP. PHP output is streamed: what PHP flushes reaches the visitor immediately, so server-sent events work. PHP keeps Ubuntu's `output_buffering = 4096`, so `echo` before `header()` keeps working, but a plain `flush()` doesn't empty that buffer: before streaming, call `while (ob_get_level()) { ob_end_flush(); }` once, then `flush()` after each event.
 
 ## 3. `phpboat.toml` (optional)
 
@@ -81,6 +81,10 @@ Unknown keys fail the deploy, so typos don't go unnoticed. All paths are relativ
 - The code is read-only. Writing next to your scripts fails; write to `DATA_DIR`, a `persist` folder or `TMPDIR`.
 - A `persist` folder's committed content (e.g. a `.gitkeep`, default images) is copied in on the first deploy only. Later deploys never overwrite what's there.
 - Files in a `persist` folder inside the docroot are served as static files, never executed as PHP.
+- **phpboat never runs a file from `DATA_DIR`, `TMPDIR` or the sessions folder**: not for a web request, not as a cron `run` script, not as a `before_start` script. Those must be in the deployed code. What your own code `include`s is up to you: PHP can read these folders (SQLite and your uploads need that), so it can also include a file from them. Keep uploads safe:
+  - Never build an `include`/`require` path from user input (`$_GET`, `$_POST`, cookies, database values a visitor controls).
+  - Store uploads under a name you generate (e.g. `bin2hex(random_bytes(16))` plus an extension from your own allowlist), not under the name or extension the visitor sent.
+  - Each backup counts the PHP-looking files in `DATA_DIR` (`.php`, `.phtml`, `.phar`, `.inc`, …). If there are any, the app page and the status API warn about them.
 - **Backups** take the whole `DATA_DIR`. SQLite databases are copied as consistent snapshots. Every other file is copied as it is at that moment, so each file is consistent only by itself: a file written during the backup may be the previous version, or missing if it was deleted meanwhile. Symbolic links are kept as links and never followed; sockets and other special files are skipped; `.pre-restore-*` folders are never backed up. Limit: 2 GB of content per app. A manual or scheduled backup above it fails. A pre-deploy backup above it is skipped with a warning in the deploy log, and the deploy goes ahead without it.
 - **Restore** replaces the whole `DATA_DIR`. The data it replaces is moved to `DATA_DIR/.pre-restore-<unix-time>/` (the newest two are kept). Links that point outside `DATA_DIR` are not put back.
 

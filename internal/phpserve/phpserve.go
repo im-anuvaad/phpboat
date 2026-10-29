@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/im-anuvaad/phpboat/internal/fastcgi"
+	"github.com/im-anuvaad/phpboat/internal/phpfile"
 )
 
 // Limits (plan §4).
@@ -101,15 +102,8 @@ func New(cfg Config) (*Site, error) {
 
 func within(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+"/") }
 
-// phpLike: extensions whose source must never be sent as a file. Only
-// lowercase ".php" is executed (FPM's security.limit_extensions).
-func phpLike(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".php", ".phtml", ".phar", ".php3", ".php4", ".php5", ".php7", ".php8", ".phps", ".inc":
-		return true
-	}
-	return false
-}
+// phpLike: extensions whose source must never be sent as a file.
+var phpLike = phpfile.Like
 
 var rootDenyNames = map[string]bool{"composer.json": true, "composer.lock": true, "phpboat.toml": true}
 var rootDenyExt = map[string]bool{".sqlite": true, ".sqlite3": true, ".db": true, ".sql": true, ".log": true}

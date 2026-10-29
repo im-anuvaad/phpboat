@@ -135,6 +135,21 @@ type AppRow struct {
 	LastDeployErr string
 	BackupProblem string
 	LastBackup    time.Time
+	PHPInData     int      // PHP-looking files the last good backup found in DATA_DIR
+	PHPInDataList []string // the first few of their paths
+}
+
+// PHPInDataText is the warning for PHP files found in DATA_DIR ("" = none).
+func (r AppRow) PHPInDataText() string {
+	if r.PHPInData == 0 {
+		return ""
+	}
+	more := ""
+	if r.PHPInData > len(r.PHPInDataList) {
+		more = ", …"
+	}
+	return fmt.Sprintf("%d PHP file(s) found in the data folder at the last backup (%s%s). phpboat never runs them, but app code that includes one would: check that uploads can't be named .php and that no include path comes from user input.",
+		r.PHPInData, strings.Join(r.PHPInDataList, ", "), more)
 }
 
 func (s *Server) appRows(ctx context.Context) ([]AppRow, error) {
@@ -165,6 +180,7 @@ func (s *Server) appRows(ctx context.Context) ([]AppRow, error) {
 			row.BackupProblem = s.Backups.Problem(ctx, a.Name)
 			if b, ok := s.Backups.Latest(ctx, a.Name); ok && b.Status == backup.StatusOK {
 				row.LastBackup = b.CreatedAt
+				row.PHPInData, row.PHPInDataList = b.PHPFiles, b.PHPPaths
 			}
 		}
 		rows = append(rows, row)
@@ -212,6 +228,9 @@ func (s *Server) warnings(r *http.Request, rows []AppRow) []string {
 	for _, r := range rows {
 		if r.BackupProblem != "" {
 			ws = append(ws, r.Name+": "+r.BackupProblem)
+		}
+		if r.PHPInData > 0 {
+			ws = append(ws, fmt.Sprintf("%s: %d PHP file(s) found in the data folder. See the app's Backups section.", r.Name, r.PHPInData))
 		}
 		switch {
 		case r.Status.State == supervisor.Crashed:

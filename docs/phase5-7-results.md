@@ -56,6 +56,6 @@ The fresh install kept the PHP packages from earlier runs, so the apt step insta
 - Sizes are binary (2 GB is 2 GiB), but the messages say "GB".
 - Right after the dashboard domain is saved, requests for it can fail with Cloudflare 525 for about two seconds. phpboat's log showed "no certificate for server name" until the Origin CA certificate was installed. Earlier intermittent 525 responses on login were not explained.
 
-## Open decision
+## Open decision (now decided)
 
-`open_basedir` includes `DATA_DIR`, which PHP's own `include` needs for SQLite. This is the same open issue as in [phase 4](phase4-results.md#open-issue-from-phase-3).
+`open_basedir` includes `DATA_DIR`, because SQLite and uploads need it. This was the same open issue as in [phase 4](phase4-results.md#open-issue-from-phase-3), where the decision is recorded.

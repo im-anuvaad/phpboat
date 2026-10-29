@@ -4,7 +4,7 @@ A tiny, self-contained PaaS for **plain PHP + SQLite** web apps on a single VPS 
 
 Scope: 1 server (Ubuntu 24.04 or 26.04), 1 user, about 5 apps. A sibling of [binboat](https://github.com/im-anuvaad/binboat), which does the same for Go, Zig and C binaries.
 
-**Status: in development, not usable yet.** Phases 0-4 are done: apps are deployed from a commit of a GitHub branch, with Composer, persist folders and `before_start` scripts. Cron, backups of all data, and the installer come next.
+**Status: before v1, not released yet.** Phases 0-7 are done and tested on a real Ubuntu 26.04 server behind Cloudflare: apps are deployed from a commit of a GitHub branch, with Composer, persist folders and `before_start` scripts; the whole data folder is backed up to an S3 bucket and can be restored; cron jobs are built in; the installer sets up PHP and Composer. Phase 8 is in progress: the end-to-end run on a real server with Cloudflare R2 passed ([results](docs/phase8-e2e-results.md)); the final docs and the v1.0.0 release are left. Until v1.0.0 is tagged there is no release to install from.
 
 - Design and phases: [docs/plan.md](docs/plan.md)
 - App contract (draft): [docs/app-contract.md](docs/app-contract.md)

@@ -133,14 +133,17 @@ func (s *Supervisor) Apps() []*App {
 	return out
 }
 
-// StartAll starts apps one at a time, waiting for each to
-// become healthy or fail before starting the next. Apps without a build
-// and apps for which want returns false are skipped. Failures are logged;
-// failed apps keep retrying under the restart policy.
+// StartAll starts apps in parallel and returns once each has become
+// healthy or failed. Apps without a build and apps for which want returns
+// false are skipped. Failures are logged; failed apps keep retrying under
+// the restart policy.
 func (s *Supervisor) StartAll(ctx context.Context, want func(name string) bool) {
+	// In parallel: an app whose before_start or health check takes long
+	// (up to minutes) must not hold back the others.
+	var wg sync.WaitGroup
 	for _, a := range s.Apps() {
 		if ctx.Err() != nil {
-			return
+			break
 		}
 		if a.Spec().BuildID == "" {
 			s.deps.Log.Info("app not started: never deployed", "app", a.Spec().Name)
@@ -150,10 +153,15 @@ func (s *Supervisor) StartAll(ctx context.Context, want func(name string) bool) 
 			s.deps.Log.Info("app not started: it was stopped by the operator", "app", a.Spec().Name)
 			continue
 		}
-		if err := a.Start(ctx); err != nil {
-			s.deps.Log.Error("app failed to start", "app", a.Spec().Name, "err", err)
-		}
+		wg.Add(1)
+		go func(a *App) {
+			defer wg.Done()
+			if err := a.Start(ctx); err != nil {
+				s.deps.Log.Error("app failed to start", "app", a.Spec().Name, "err", err)
+			}
+		}(a)
 	}
+	wg.Wait()
 }
 
 // StopAll stops every app in parallel and shuts down the actors.
