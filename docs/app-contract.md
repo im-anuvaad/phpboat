@@ -1,6 +1,6 @@
 # phpboat App Contract
 
-**Draft** (contract version **1**). The rules a plain PHP + SQLite app follows to be hosted on phpboat. Design background: [plan.md](plan.md).
+Contract version **1**. The rules a plain PHP + SQLite app follows to be hosted on phpboat. How phpboat works inside: [architecture.md](architecture.md).
 
 phpboat is for **hand-written PHP**: no framework needed, no build step, no CI. Connect the repo, press **Deploy**.
 

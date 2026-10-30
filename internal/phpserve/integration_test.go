@@ -62,7 +62,7 @@ func (l *lineLog) has(sub string) bool {
 }
 
 // startFPM runs php-fpm -F with a pool like the one phpboat writes
-// (docs/plan.md §8), as the current user.
+// (docs/architecture.md §8), as the current user.
 func startFPM(t testing.TB) *realFPM {
 	t.Helper()
 	bin := findFPM()

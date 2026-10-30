@@ -1,4 +1,4 @@
-// Package deployer implements the deploy pipeline (docs/plan.md §5). A commit
+// Package deployer implements the deploy pipeline (docs/architecture.md §5). A commit
 // of the app's branch is fetched as a source archive, checked against
 // phpboat.toml, and prepared into a build: Composer runs in its own cgroup,
 // and the result is read-only. The old build serves until the switch. The
@@ -50,7 +50,7 @@ const (
 
 // Limits and timeouts of a deploy.
 const (
-	maxTarball      = 200 << 20 // the source archive of a commit (docs/plan.md §5)
+	maxTarball      = 200 << 20 // the source archive of a commit (docs/architecture.md §5)
 	commitsTTL      = time.Minute
 	ListCommits     = 10 // commits the app page offers
 	composeTimeout  = 10 * time.Minute
@@ -104,7 +104,7 @@ type Deps struct {
 	// deploy and restarts the old build.
 	PreDeploy func(ctx context.Context, app string, log *logs.Log) error
 	// Cron stops an app's scheduled jobs before the app is stopped for a
-	// switch (docs/plan.md §5 step 7). Set by serve.go; nil means no jobs.
+	// switch (docs/architecture.md §5 step 7). Set by serve.go; nil means no jobs.
 	Cron CronDrainer
 }
 

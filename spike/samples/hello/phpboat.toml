@@ -1,3 +1,0 @@
-contract     = 1
-health_path  = "/healthz"
-before_start = ["bin/migrate.php"]

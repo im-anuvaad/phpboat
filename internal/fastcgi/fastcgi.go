@@ -1,8 +1,8 @@
-// Package fastcgi is a small FastCGI client for PHP-FPM (docs/plan.md §4):
+// Package fastcgi is a small FastCGI client for PHP-FPM (docs/architecture.md §4):
 // the responder role, one request per connection, request bodies and
 // responses streamed. The Go standard library only has the server side.
 //
-// It is written for phpboat's hot path (phase 1, F8): buffers are pooled,
+// It is written for phpboat's hot path (docs/architecture.md §4): buffers are pooled,
 // and the response is read straight from the connection by the caller's
 // goroutine (no extra goroutine or pipe per request).
 package fastcgi

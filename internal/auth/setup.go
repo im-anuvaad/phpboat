@@ -15,10 +15,12 @@ import (
 
 // One-time password (docs/architecture.md). The installer
 // (`phpboat setup-host`) creates it; signing in with it gives a session that
-// can only set the admin email and password.
+// can only set the admin email and password. It is valid for 10 minutes: the
+// person who just ran the installer finishes the setup right away, and the
+// setup address on the server's IP closes soon after.
 const (
 	SettingSetupPassword = "setup_password"
-	SetupValidity        = 24 * time.Hour
+	SetupValidity        = 10 * time.Minute
 	setupAlphabet        = "abcdefghjkmnpqrstuvwxyz23456789" // no 0/o, 1/l/i
 	setupGroups          = 4
 	setupGroupLen        = 5

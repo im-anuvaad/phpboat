@@ -1,6 +1,6 @@
-// Package phpserve serves one PHP app (docs/plan.md §4): static files from
+// Package phpserve serves one PHP app (docs/architecture.md §4): static files from
 // its docroot directly, PHP scripts through FastCGI, a front controller as
-// the fallback. PHP never runs from outside the deployed build (P14).
+// the fallback. PHP never runs from outside the deployed build (docs/architecture.md §4).
 package phpserve
 
 import (
@@ -21,7 +21,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/phpfile"
 )
 
-// Limits (plan §4).
+// Limits (docs/architecture.md §4).
 const (
 	MaxHeaderBytes = 32 << 10  // Cloudflare's own request header limit; above → 431
 	MaxBodyBytes   = 100 << 20 // Cloudflare's free-plan body limit; above → 413
@@ -252,7 +252,7 @@ func (s *Site) php(w http.ResponseWriter, r *http.Request, script, uri, pathInfo
 	fp := filepath.Join(s.docroot, script)
 	real, err := filepath.EvalSymlinks(fp)
 	if err != nil || !within(real, s.buildReal) || (s.dataReal != "" && within(real, s.dataReal)) {
-		s.cfg.Error(w, r, http.StatusNotFound) // PHP outside the build never runs (P14)
+		s.cfg.Error(w, r, http.StatusNotFound) // PHP outside the build never runs (docs/architecture.md §4)
 		return
 	}
 
@@ -446,7 +446,7 @@ func cgiName(k string) string {
 }
 
 // Ping runs a GET for path through the full handler and returns the
-// status (health checks, plan §8).
+// status (health checks, docs/architecture.md §8).
 func (s *Site) Ping(ctx context.Context, host, path string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+path, nil)
 	if err != nil {

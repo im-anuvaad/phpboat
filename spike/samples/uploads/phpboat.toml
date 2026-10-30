@@ -1,5 +1,0 @@
-contract = 1
-persist  = ["public/uploads"]
-
-[php]
-upload_max_filesize = "20M"

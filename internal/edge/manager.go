@@ -46,7 +46,7 @@ const (
 	// on), before it requires the certificate. Cloudflare's edge servers
 	// pick the change up gradually: on a real VPS some of them kept
 	// connecting without it for almost 5 minutes, and every such request
-	// failed with error 520 (D43).
+	// failed with error 520 (docs/architecture.md §10).
 	AOPRollout = 10 * time.Minute
 )
 
@@ -201,7 +201,7 @@ func (m *Manager) DashboardProblem() string {
 	h := m.dashHost
 	seen := h != "" && m.dashSeen == h
 	zid := m.hostZone[h]
-	// While Cloudflare rolls the AOP certificate out (D43) it is in place
+	// While Cloudflare rolls the AOP certificate out it is in place
 	// at Cloudflare, just not required yet: that counts.
 	_, rolling := m.rollout[zid]
 	enforced := m.enforce[zid] || rolling
@@ -415,7 +415,7 @@ func (m *Manager) tlsConfig() *tls.Config {
 			pool := m.aop.Pool
 			m.mu.RUnlock()
 			// No client certificate is asked for while Cloudflare rolls
-			// ours out (D43): edge servers that don't have it yet present
+			// ours out: edge servers that don't have it yet present
 			// Cloudflare's shared origin-pull certificate instead, which
 			// would fail verification.
 			if enforce {

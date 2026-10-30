@@ -1,7 +1,7 @@
 // Package phpcli runs PHP CLI commands for an app: Composer while a build is
 // prepared, before_start scripts before a start, and cron jobs. The command
 // runs as the app's user, inside a cgroup, with exactly the environment it is
-// given, and is killed when it outlives its timeout (docs/plan.md §5, §8).
+// given, and is killed when it outlives its timeout (docs/architecture.md §5, §8).
 package phpcli
 
 import (
@@ -71,7 +71,7 @@ func Run(ctx context.Context, c Command) (Result, error) {
 		return Result{}, err
 	}
 	defer r.Close()
-	// Like php-fpm's pipes (phase 1, F2), the write end belongs to the app user.
+	// Like php-fpm's pipes (docs/architecture.md §8), the write end belongs to the app user.
 	if err := w.Chown(int(c.User.UID), int(c.User.GID)); err != nil {
 		w.Close()
 		return Result{}, err

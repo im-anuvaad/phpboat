@@ -300,7 +300,7 @@ func (g *Group) Populated() (bool, error) {
 // It deliberately does NOT use cgroup.kill: on the Ubuntu 24.04 kernels we
 // tested, once cgroup.kill had been written for a group, every later child
 // spawned into that group with clone3(CLONE_INTO_CGROUP) was SIGKILLed right
-// away, which broke restarts (docs/architecture.md, decision D10).
+// away, which broke restarts (docs/architecture.md §8).
 func (g *Group) Kill() error {
 	signaled := map[int]bool{}
 	for pass := 0; pass < 20; pass++ {
@@ -352,7 +352,7 @@ type Stats struct {
 	MemoryCurrent int64 // bytes, including reclaimable page cache
 	// MemoryApp is what the app itself uses: anon + shmem (OPcache) +
 	// kernel from memory.stat. memory.current also counts page cache
-	// charged to whichever app first read a shared file (phase 1, F5).
+	// charged to whichever app first read a shared file (docs/architecture.md §8).
 	MemoryApp    int64
 	CPUUsageUsec int64 // cumulative
 	PidsCurrent  int64

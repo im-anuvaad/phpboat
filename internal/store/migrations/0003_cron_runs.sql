@@ -1,4 +1,4 @@
--- History of cron jobs (docs/plan.md §9): the last 20 runs of each job,
+-- History of cron jobs (docs/architecture.md §9): the last 20 runs of each job,
 -- skipped runs included. Rows are written when a run ends, and deleted with
 -- the app.
 CREATE TABLE cron_runs (

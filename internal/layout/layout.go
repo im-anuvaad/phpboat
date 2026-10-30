@@ -55,7 +55,7 @@ func (l Layout) AppsDir() string { return filepath.Join(l.Root, "apps") }
 func (l Layout) AppDir(app string) string { return filepath.Join(l.AppsDir(), app) }
 
 // ComposerPhar is the pinned Composer that the installer puts on the host
-// (docs/plan.md §3). It is outside the data root: nothing an app writes can
+// (docs/architecture.md §3). It is outside the data root: nothing an app writes can
 // reach it.
 const ComposerPhar = "/usr/local/lib/phpboat/composer.phar"
 

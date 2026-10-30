@@ -1,4 +1,4 @@
--- Phase 5 (docs/plan.md §7): a backup holds the whole DATA_DIR, so a row says
+-- Phase 5 (docs/architecture.md §7): a backup holds the whole DATA_DIR, so a row says
 -- what it holds. files (databases in the archive) becomes databases. The new
 -- columns count the other entries, and content_bytes is the uncompressed
 -- size of the files, SQLite snapshots included.

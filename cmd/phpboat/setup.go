@@ -110,6 +110,8 @@ func setupHost(out io.Writer) error {
 	fmt.Fprintf(out, "                     Your browser warns that the certificate is not trusted: expected here, continue.\n")
 	fmt.Fprintf(out, "  One-time password: %s\n", pw)
 	fmt.Fprintf(out, "                     Leave the email empty. Works once, until %s.\n", until.UTC().Format("2006-01-02 15:04 UTC"))
+	fmt.Fprintf(out, "\n  Finish the setup within %d minutes. After that the one-time password expires\n", int(auth.SetupValidity.Minutes()))
+	fmt.Fprintf(out, "  and you need to run the install command again.\n")
 	if domain != "" {
 		fmt.Fprintf(out, "\n  Dashboard:         https://%s\n", domain)
 		fmt.Fprintf(out, "                     Sign in there as usual; the address above is only needed if that fails.\n")

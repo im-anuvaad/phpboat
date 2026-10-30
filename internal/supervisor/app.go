@@ -28,7 +28,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
 
-// beforeStartTimeout bounds one before_start script (docs/plan.md §5).
+// beforeStartTimeout bounds one before_start script (docs/architecture.md §5).
 const beforeStartTimeout = 5 * time.Minute
 
 // State of an app.
@@ -551,7 +551,7 @@ func (a *App) startProcess(spec app.Spec) (*exec.Cmd, *phpserve.Site, error) {
 	defer unix.Close(fd)
 
 	// The pipes belong to the app user: FPM reopens /proc/self/fd/2 for its
-	// error_log, which fails with EACCES on a root-owned pipe (phase 1, F2).
+	// error_log, which fails with EACCES on a root-owned pipe (docs/architecture.md §8).
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		return nil, nil, err

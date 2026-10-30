@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Defaults (docs/plan.md §8).
+// Defaults (docs/architecture.md §8).
 const (
 	DefaultConcurrency = 4
 	MaxConcurrency     = 16
@@ -113,7 +113,7 @@ func sortedKeys(m map[string]string) []string {
 
 // DefaultMemoryLimit is the per-request memory_limit: the app's memory
 // divided by its concurrency, so concurrent requests fail with PHP's own
-// error before the kernel OOM-kills workers (phase 1, F4). At least 16M.
+// error before the kernel OOM-kills workers (docs/architecture.md §8). At least 16M.
 func DefaultMemoryLimit(memoryMax int64, concurrency int) string {
 	if concurrency < 1 {
 		concurrency = 1

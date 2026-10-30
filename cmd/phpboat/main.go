@@ -2,7 +2,7 @@
 //
 // It has no admin CLI: install.sh runs `phpboat setup-host`, systemd runs
 // `phpboat serve`, and everything else happens in the dashboard
-// (docs/architecture.md, D33).
+// (docs/architecture.md §1).
 package main
 
 import (

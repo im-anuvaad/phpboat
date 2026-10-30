@@ -5,7 +5,7 @@
 #
 # Supported: Ubuntu 26.04 (PHP 8.5), the only release tested on a real server,
 # and Ubuntu 24.04 (PHP 8.3), not tested yet. In-place upgrades between
-# releases are refused. See docs/plan.md §3 and §9. Nothing is built on the server.
+# releases are refused. See docs/architecture.md §3 and §9. Nothing is built on the server.
 #
 #   1. checks the host: Ubuntu 24.04 or 26.04, the -security apt pocket enabled,
 #      the release this server was first installed on, systemd, cgroup v2,
@@ -16,14 +16,14 @@
 #      then stops and masks the distro's php<ver>-fpm.service, because phpboat
 #      runs its own PHP-FPM masters
 #   4. installs the pinned Composer (composer.phar, SHA-256 checked)
-#   5. stops phpboat if it runs, installs the binary, and runs `phpboat setup-host`:
-#      directories, master key, systemd unit, a new one-time password, start,
-#      and prints the address to open
-#   6. prints the installed PHP version
+#   5. stops phpboat if it runs, installs the binary, prints the PHP version
+#   6. runs `phpboat setup-host`: directories, master key, systemd unit, a new
+#      one-time password (valid for 10 minutes), start, and prints the address
+#      to open
 #
 # Running it again updates phpboat, Composer and the PHP packages and keeps
 # every app and setting. It also prints a new one-time password (lost password,
-# broken dashboard domain).
+# broken dashboard domain), valid for 10 minutes.
 #
 #   PHPBOAT_VERSION=v1.0.0      install that release instead of the latest
 #   PHPBOAT_BINARY=/path/file   install this local binary instead of downloading
@@ -91,7 +91,7 @@ check_host() {
 }
 
 # A server stays on the Ubuntu release it was first installed on: an in-place
-# upgrade would change PHP under the apps (docs/plan.md §3).
+# upgrade would change PHP under the apps (docs/architecture.md §3).
 check_release_record() {
   [ -f "$RELEASE_FILE" ] || return 0
   local recorded
@@ -140,8 +140,8 @@ apt_update() {
   apt-get "${APT_OPTS[@]}" update -qq </dev/null || fail "apt-get update failed (see above)"
 }
 
-# PHP's security fixes come from the -security pocket (docs/plan.md §3; finding
-# F1 in docs/phase1-results.md). Without it PHP would stay unpatched: refuse.
+# PHP's security fixes come from the -security pocket (docs/architecture.md §3).
+# Without it PHP would stay unpatched: refuse.
 check_security_pocket() {
   local suite="${VERSION_CODENAME}-security" policy
   policy="$(apt-cache policy 2>/dev/null || true)"
@@ -225,8 +225,10 @@ main() {
   mask_distro_fpm
   install_composer
   install_binary
-  "$INSTALL_PATH" setup-host
   print_php
+  # Last, so the address, the one-time password and its 10-minute limit
+  # are what the screen ends with.
+  "$INSTALL_PATH" setup-host
 }
 
 main "$@"
