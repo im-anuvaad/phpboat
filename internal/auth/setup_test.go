@@ -33,7 +33,7 @@ func TestSetupFlow(t *testing.T) {
 	if !regexp.MustCompile(`^[a-z2-9]{5}(-[a-z2-9]{5}){3}$`).MatchString(pw) {
 		t.Fatalf("format: %q", pw)
 	}
-	if d := time.Until(until); d < 23*time.Hour || d > 25*time.Hour {
+	if d := time.Until(until); d < 9*time.Minute || d > 11*time.Minute {
 		t.Fatalf("expiry %v", d)
 	}
 	if v, _, _ := st.GetSetting(ctx, SettingSetupPassword); strings.Contains(string(v), pw) {

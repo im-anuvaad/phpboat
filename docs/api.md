@@ -1,7 +1,5 @@
 # phpboat Status API
 
-> Build and commit fields since phase 4, and the `php` field since phase 7, of [plan.md](plan.md).
-
 A small **read-only** JSON API for scripts and AI agents: "is my blog up?", "why is the shop unhealthy?", "when was the last backup?". It can't deploy, stop, restart or change anything; that stays in the dashboard.
 
 Version: **v1**. Base URL: `https://<dashboard domain>/api/v1`.

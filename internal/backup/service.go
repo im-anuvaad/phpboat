@@ -38,7 +38,7 @@ const (
 	StatusFailed  = "failed"
 )
 
-// Policy (docs/plan.md §7). It is fixed.
+// Policy (docs/architecture.md §7). It is fixed.
 const (
 	Interval       = 3 * time.Hour
 	Retention      = 48 * time.Hour
@@ -249,7 +249,7 @@ func (s *Service) client(ctx context.Context) (*s3.Client, s3.Config, bool, erro
 }
 
 // Folder is where the backups of app live in the bucket: one folder per
-// app at the bucket root (docs/plan.md §7).
+// app at the bucket root (docs/architecture.md §7).
 func Folder(app string) string { return app + "/" }
 
 // ---------------------------------------------------------------- rows

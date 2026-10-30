@@ -1,4 +1,4 @@
--- phpboat's schema (docs/plan.md §9). Phase 4 squashed the migrations of
+-- phpboat's schema (docs/architecture.md §9). Phase 4 squashed the migrations of
 -- phases 0-3 into this one: phpboat has never been released, so no installed
 -- database needs upgrading.
 
@@ -19,7 +19,7 @@ CREATE TABLE users (
 
 -- Dashboard sessions. Only the SHA-256 of the session token is stored.
 -- setup = 1: created with the installer's one-time password, which may only
--- set up the admin account (docs/architecture.md §4).
+-- set up the admin account (docs/architecture.md §10).
 CREATE TABLE sessions (
     id_hash    BLOB    PRIMARY KEY,
     csrf       TEXT    NOT NULL,

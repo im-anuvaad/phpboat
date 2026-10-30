@@ -360,7 +360,7 @@ func (p *phpRuntime) info() (php.Runtime, string) {
 }
 
 // watch restarts the running apps one at a time when apt updates PHP:
-// running FPM masters keep the old code until they restart (plan §3).
+// running FPM masters keep the old code until they restart (docs/architecture.md §3).
 func (p *phpRuntime) watch(ctx context.Context, log *slog.Logger, sup *supervisor.Supervisor, dep *deployer.Deployer) {
 	rt, err := p.get()
 	for err != nil {

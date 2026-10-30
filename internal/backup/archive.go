@@ -118,7 +118,7 @@ const MaxPHPPaths = 5
 
 // phpFiles counts the files and links in m whose names look like PHP source
 // (phpfile.Like) and returns the first MaxPHPPaths of their paths. phpboat
-// never runs such a file (P14), but app code that includes one would.
+// never runs such a file (docs/architecture.md §4), but app code that includes one would.
 func phpFiles(m *Manifest) (int, []string) {
 	n := 0
 	var paths []string

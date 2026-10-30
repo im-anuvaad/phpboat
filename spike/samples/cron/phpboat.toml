@@ -1,6 +1,0 @@
-contract     = 1
-before_start = ["bin/migrate.php"]
-
-[[cron]]
-schedule = "* * * * *"
-run      = "bin/tick.php"

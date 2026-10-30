@@ -1,4 +1,4 @@
-// Package php knows about the host's PHP (docs/plan.md §3, §8): which
+// Package php knows about the host's PHP (docs/architecture.md §3, §8): which
 // php-fpm is installed, the pool configuration phpboat writes for each
 // app, and when apt updated PHP underneath the running pools.
 package php

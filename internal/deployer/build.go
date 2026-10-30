@@ -25,7 +25,7 @@ import (
 	"github.com/im-anuvaad/phpboat/internal/users"
 )
 
-// maxBuildMemory and maxBuildProcesses bound the build cgroup (docs/plan.md §5).
+// maxBuildMemory and maxBuildProcesses bound the build cgroup (docs/architecture.md §5).
 const (
 	maxBuildMemory    = 256 << 20
 	maxBuildProcesses = 256

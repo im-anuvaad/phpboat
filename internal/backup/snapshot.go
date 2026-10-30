@@ -1,7 +1,7 @@
 // Package backup archives the whole DATA_DIR of each app: SQLite databases as
 // consistent snapshots, every other file as it is copied, links as links.
 // It keeps the newest archives locally, uploads them to S3-compatible
-// storage, applies retention and restores them (docs/plan.md §7).
+// storage, applies retention and restores them (docs/architecture.md §7).
 package backup
 
 import (
