@@ -4,6 +4,10 @@ All notable changes to phpboat. Versions follow [Semantic Versioning](https://se
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-31
+
+The only change in the binary is the new dashboard icon; upgrading is optional.
+
 - New logo, favicon and an 88×31 "deployed with phpboat" button.
 - README: links to the website and documentation, support and updates policy.
 - LICENSE: copyright holder and year filled in.
@@ -22,5 +26,6 @@ First release.
 - Dashboard with charts, live logs, env vars (encrypted at rest) and a read-only status API.
 - Installer for Ubuntu 26.04 (PHP 8.5, tested) and 24.04 (PHP 8.3, accepted, not tested yet), with pinned Composer; re-running it updates phpboat. The one-time setup password is valid for 10 minutes.
 
-[Unreleased]: https://github.com/im-anuvaad/phpboat/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/im-anuvaad/phpboat/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/im-anuvaad/phpboat/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/im-anuvaad/phpboat/releases/tag/v1.0.0
